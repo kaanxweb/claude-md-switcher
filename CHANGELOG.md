@@ -4,15 +4,19 @@ All notable changes to ClaudeMDSwitcher are documented here. The format is based
 
 ## [1.0.1] — Unreleased
 
+### Added
+- Added secure automatic update checks through Sparkle 2.9.4 and a **Check for Updates…** menu command. Downloads and installations remain user-approved (`SUAutomaticallyUpdate=false`).
+
 ### Security
 - Hardened the distribution process to require Developer ID Application signing, Apple notarization, and ticket stapling; release builds now fail closed instead of falling back to ad-hoc signing.
 - Moved notarization credentials to a local Keychain profile and required a clean checkout at the exact signed, annotated version tag before building.
 - Added packaged bundle-identifier, version, build-number, arm64 architecture, checksum, and draft-release verification gates before publication.
+- Added a signed Sparkle appcast and embedded public key, making v1.0.1 the update trust-root release.
 
 ### Fixed
 - Preserved a later regular `~/.claude/CLAUDE.md` as a uniquely named recovery profile when `CLAUDE.default.md` already exists, avoiding content loss during profile switching.
 
-There are no new application features in this release. v1.0.1 uses build number 2 and is intended to be the first Developer ID-signed and notarized release.
+v1.0.0 cannot self-update, so users must manually replace it with v1.0.1 once. Profiles in `~/.claude/` are unaffected. v1.0.1 uses build number 2 and is intended to be the first Developer ID-signed and notarized release.
 
 ## [1.0.0] — 2026-05-14
 

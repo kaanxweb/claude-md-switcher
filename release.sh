@@ -7,7 +7,7 @@ cd "$ROOT"
 
 usage() {
     cat >&2 <<EOF
-Usage: $0 --version X.Y.Z --build N --team-id TEAMID --notary-profile PROFILE [--signing-identity IDENTITY]
+Usage: $0 --version X.Y.Z --build N --team-id TEAMID --notary-profile PROFILE --sparkle-key-account ACCOUNT [--signing-identity IDENTITY]
 EOF
 }
 
@@ -29,8 +29,12 @@ BUILD=""
 TEAM_ID=""
 NOTARY_PROFILE=""
 REQUESTED_IDENTITY=""
+SPARKLE_KEY_ACCOUNT=""
+SPARKLE_KEY_ACCOUNT_SEEN=0
 APP_NAME="ClaudeMDSwitcher.app"
 EXECUTABLE_NAME="ClaudeMDSwitcher"
+RELEASE_SIGNERS_FILE="$ROOT/.github/release-signers"
+AUTHORIZED_TAG_SIGNER_FINGERPRINT="SHA256:PAF5hWTFuJzAFzhrjE0AgmsEl+5DHOTsyixO2zD1PLg"
 OUTPUTS_INITIALIZED=0
 CURRENT_LOG_RETAINED=0
 RELEASE_SUCCEEDED=0
@@ -46,7 +50,7 @@ cleanup() {
         rm -f -- "$PENDING_NOTARY_LOG"
         if [[ "$RELEASE_SUCCEEDED" -ne 1 ]]; then
             rm -rf -- "$PUBLIC_APP"
-            rm -f -- "$PUBLIC_RELEASE_ZIP" "$PUBLIC_CHECKSUM"
+            rm -f -- "$PUBLIC_RELEASE_ZIP" "$PUBLIC_CHECKSUM" "$PUBLIC_APPCAST"
         fi
         if [[ "$CURRENT_LOG_RETAINED" -ne 1 ]]; then
             rm -f -- "$PUBLIC_NOTARY_LOG"
@@ -62,13 +66,14 @@ initialize_release_outputs() {
     PUBLIC_RELEASE_ZIP="$ROOT/$RELEASE_ZIP_NAME"
     PUBLIC_CHECKSUM="$ROOT/$CHECKSUM_NAME"
     PUBLIC_NOTARY_LOG="$ROOT/$NOTARY_LOG_NAME"
+    PUBLIC_APPCAST="$ROOT/appcast.xml"
     PENDING_NOTARY_LOG="$ROOT/.${NOTARY_LOG_NAME}.pending.$$"
     OUTPUTS_INITIALIZED=1
     trap cleanup EXIT
 
     # The strict version makes every deletion target fixed and narrow.
     rm -rf -- "$PUBLIC_APP"
-    rm -f -- "$PUBLIC_RELEASE_ZIP" "$PUBLIC_CHECKSUM" "$PUBLIC_NOTARY_LOG" "$PENDING_NOTARY_LOG"
+    rm -f -- "$PUBLIC_RELEASE_ZIP" "$PUBLIC_CHECKSUM" "$PUBLIC_NOTARY_LOG" "$PENDING_NOTARY_LOG" "$PUBLIC_APPCAST"
 
     WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/claude-md-release.XXXXXX")
     APP="$WORK_DIR/$APP_NAME"
@@ -147,6 +152,12 @@ while [[ $# -gt 0 ]]; do
             REQUESTED_IDENTITY="$2"
             shift 2
             ;;
+        --sparkle-key-account)
+            require_option_value "$@"
+            SPARKLE_KEY_ACCOUNT_SEEN=$((SPARKLE_KEY_ACCOUNT_SEEN + 1))
+            SPARKLE_KEY_ACCOUNT="$2"
+            shift 2
+            ;;
         *)
             echo "ERROR: Unknown argument: $1" >&2
             usage
@@ -178,11 +189,25 @@ if [[ -z "$NOTARY_PROFILE" ]]; then
     usage
     exit 2
 fi
+if [[ "$SPARKLE_KEY_ACCOUNT_SEEN" -ne 1 ]]; then
+    echo "ERROR: --sparkle-key-account must be provided exactly once." >&2
+    usage
+    exit 2
+fi
+if [[ ! "$SPARKLE_KEY_ACCOUNT" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: Sparkle key account may contain only letters, numbers, dots, underscores, and hyphens." >&2
+    exit 2
+fi
+RELEASE_NOTES_SOURCE="$ROOT/.github/release-notes-${VERSION}.md"
+if [[ ! -s "$RELEASE_NOTES_SOURCE" ]]; then
+    echo "ERROR: Matching release notes not found or empty: $RELEASE_NOTES_SOURCE" >&2
+    exit 1
+fi
 if [[ "$REQUESTED_IDENTITY" =~ ^[0-9A-Fa-f]{40}$ ]]; then
     REQUESTED_IDENTITY=$(printf '%s' "$REQUESTED_IDENTITY" | tr '[:lower:]' '[:upper:]')
 fi
 
-for command in git swift codesign security xcrun spctl ditto shasum lipo; do
+for command in git swift codesign security xcrun spctl ditto shasum lipo otool xmllint readlink stat; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "ERROR: Required command not found: $command" >&2
         exit 1
@@ -211,8 +236,21 @@ if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/$EXPECTED_TAG^{comm
     echo "ERROR: HEAD must be exactly the commit tagged $EXPECTED_TAG." >&2
     exit 1
 fi
-if ! git tag -v "$EXPECTED_TAG"; then
+if [[ ! -s "$RELEASE_SIGNERS_FILE" ]]; then
+    echo "ERROR: Authorized release signer allowlist is missing or empty: $RELEASE_SIGNERS_FILE" >&2
+    exit 1
+fi
+TAG_VERIFY_OUTPUT=$(LC_ALL=C git \
+    -c gpg.format=ssh \
+    -c gpg.ssh.allowedSignersFile="$RELEASE_SIGNERS_FILE" \
+    tag -v "$EXPECTED_TAG" 2>&1) || {
+    printf '%s\n' "$TAG_VERIFY_OUTPUT" >&2
     echo "ERROR: Signature verification failed for release tag $EXPECTED_TAG." >&2
+    exit 1
+}
+printf '%s\n' "$TAG_VERIFY_OUTPUT"
+if ! grep -Fq "Good \"git\" signature for kaanxweb with ED25519 key $AUTHORIZED_TAG_SIGNER_FINGERPRINT" <<<"$TAG_VERIFY_OUTPUT"; then
+    echo "ERROR: Release tag $EXPECTED_TAG was not signed by the authorized maintainer key $AUTHORIZED_TAG_SIGNER_FINGERPRINT." >&2
     exit 1
 fi
 
@@ -251,14 +289,49 @@ SIGNING_NAME=$(printf '%s\n' "$IDENTITY_MATCHES" | cut -f2-)
 echo "Signing identity: $SIGNING_NAME [$SIGNING_FINGERPRINT]"
 echo "Apple Team ID: $TEAM_ID"
 
-SWIFT_BUILD_DIR="$WORK_DIR/swift-build"
-swift build -c release --arch arm64 --scratch-path "$SWIFT_BUILD_DIR"
-BIN_DIR=$(swift build -c release --arch arm64 --scratch-path "$SWIFT_BUILD_DIR" --show-bin-path)
-BIN="$BIN_DIR/$EXECUTABLE_NAME"
+if ! git ls-files --error-unmatch Package.resolved >/dev/null 2>&1; then
+    echo "ERROR: Package.resolved must be tracked for reproducible release builds." >&2
+    exit 1
+fi
 
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+SWIFT_BUILD_DIR="$WORK_DIR/swift-build"
+swift build --disable-automatic-resolution -c release --arch arm64 --scratch-path "$SWIFT_BUILD_DIR"
+BIN_DIR=$(swift build --disable-automatic-resolution -c release --arch arm64 --scratch-path "$SWIFT_BUILD_DIR" --show-bin-path)
+if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+    echo "ERROR: Dependency resolution or the release build changed the clean source checkout." >&2
+    exit 1
+fi
+BIN="$BIN_DIR/$EXECUTABLE_NAME"
+SPARKLE_TOOLS_DIR="$SWIFT_BUILD_DIR/artifacts/sparkle/Sparkle/bin"
+GENERATE_KEYS="$SPARKLE_TOOLS_DIR/generate_keys"
+GENERATE_APPCAST="$SPARKLE_TOOLS_DIR/generate_appcast"
+SIGN_UPDATE="$SPARKLE_TOOLS_DIR/sign_update"
+SOURCE_SPARKLE_FRAMEWORK="$BIN_DIR/Sparkle.framework"
+
+if [[ ! -x "$BIN" ]]; then
+    echo "ERROR: Built executable not found: $BIN" >&2
+    exit 1
+fi
+if [[ ! -d "$SOURCE_SPARKLE_FRAMEWORK" ]]; then
+    echo "ERROR: Sparkle framework not found: $SOURCE_SPARKLE_FRAMEWORK" >&2
+    exit 1
+fi
+SPARKLE_FRAMEWORK_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SOURCE_SPARKLE_FRAMEWORK/Resources/Info.plist" 2>/dev/null || true)
+if [[ "$SPARKLE_FRAMEWORK_VERSION" != "2.9.4" ]]; then
+    echo "ERROR: Sparkle framework version is '${SPARKLE_FRAMEWORK_VERSION:-missing}', expected 2.9.4." >&2
+    exit 1
+fi
+for sparkle_tool in "$GENERATE_KEYS" "$GENERATE_APPCAST" "$SIGN_UPDATE"; do
+    if [[ ! -x "$sparkle_tool" ]]; then
+        echo "ERROR: Required Sparkle tool not found or not executable: $sparkle_tool" >&2
+        exit 1
+    fi
+done
+
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN" "$APP/Contents/MacOS/$EXECUTABLE_NAME"
 cp "$ROOT/Sources/ClaudeMDSwitcher/Info.plist" "$APP/Contents/Info.plist"
+/usr/bin/ditto "$SOURCE_SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/Sparkle.framework"
 
 PLIST="$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
@@ -271,46 +344,181 @@ elif [[ -f "$ROOT/scripts/generate_icon.swift" ]]; then
     (cd "$WORK_DIR" && swift "$ROOT/scripts/generate_icon.swift")
 fi
 
-verify_developer_id_app() {
+SOURCE_PUBLIC_KEY=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$ROOT/Sources/ClaudeMDSwitcher/Info.plist" 2>/dev/null || true)
+BUILT_PUBLIC_KEY=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$PLIST" 2>/dev/null || true)
+if [[ -z "$SOURCE_PUBLIC_KEY" || "$SOURCE_PUBLIC_KEY" == "__SPARKLE_PUBLIC_KEY__" ]]; then
+    echo "ERROR: Source Info.plist has a missing or placeholder SUPublicEDKey." >&2
+    exit 1
+fi
+if [[ -z "$BUILT_PUBLIC_KEY" || "$BUILT_PUBLIC_KEY" == "__SPARKLE_PUBLIC_KEY__" ]]; then
+    echo "ERROR: Built Info.plist has a missing or placeholder SUPublicEDKey." >&2
+    exit 1
+fi
+if [[ "$BUILT_PUBLIC_KEY" != "$SOURCE_PUBLIC_KEY" ]]; then
+    echo "ERROR: Built SUPublicEDKey does not exactly match the source Info.plist." >&2
+    exit 1
+fi
+if ! KEYCHAIN_PUBLIC_KEY=$("$GENERATE_KEYS" --account "$SPARKLE_KEY_ACCOUNT" -p); then
+    echo "ERROR: Could not read the Sparkle public key for account '$SPARKLE_KEY_ACCOUNT'." >&2
+    exit 1
+fi
+if [[ "$KEYCHAIN_PUBLIC_KEY" != "$SOURCE_PUBLIC_KEY" ]]; then
+    echo "ERROR: Sparkle key account '$SPARKLE_KEY_ACCOUNT' does not match SUPublicEDKey." >&2
+    exit 1
+fi
+
+verify_symlink() {
+    local link_path="$1"
+    local expected_target="$2"
+    local label="$3"
+    local actual_target
+
+    if [[ ! -L "$link_path" ]]; then
+        echo "ERROR: $label is missing required symlink: $link_path" >&2
+        exit 1
+    fi
+    actual_target=$(/usr/bin/readlink "$link_path")
+    if [[ "$actual_target" != "$expected_target" ]]; then
+        echo "ERROR: $label symlink $link_path points to '$actual_target', expected '$expected_target'." >&2
+        exit 1
+    fi
+    if [[ ! -e "$link_path" ]]; then
+        echo "ERROR: $label symlink is broken: $link_path" >&2
+        exit 1
+    fi
+}
+
+verify_sparkle_symlinks() {
+    local app_path="$1"
+    local label="$2"
+    local framework="$app_path/Contents/Frameworks/Sparkle.framework"
+
+    if [[ ! -d "$framework/Versions/B" ]]; then
+        echo "ERROR: $label is missing Sparkle.framework/Versions/B." >&2
+        exit 1
+    fi
+    verify_symlink "$framework/Versions/Current" "B" "$label"
+    verify_symlink "$framework/Sparkle" "Versions/Current/Sparkle" "$label"
+    verify_symlink "$framework/Resources" "Versions/Current/Resources" "$label"
+    verify_symlink "$framework/Headers" "Versions/Current/Headers" "$label"
+    verify_symlink "$framework/Modules" "Versions/Current/Modules" "$label"
+    verify_symlink "$framework/PrivateHeaders" "Versions/Current/PrivateHeaders" "$label"
+    verify_symlink "$framework/Autoupdate" "Versions/Current/Autoupdate" "$label"
+    verify_symlink "$framework/Updater.app" "Versions/Current/Updater.app" "$label"
+    verify_symlink "$framework/XPCServices" "Versions/Current/XPCServices" "$label"
+}
+
+verify_executable_linkage() {
+    local app_path="$1"
+    local label="$2"
+    local executable="$app_path/Contents/MacOS/$EXECUTABLE_NAME"
+    local linkage load_commands rpaths sparkle_link_count sparkle_reference_count expected_rpath_count
+    local expected_sparkle="@rpath/Sparkle.framework/Versions/B/Sparkle"
+
+    linkage=$(/usr/bin/otool -L "$executable")
+    load_commands=$(/usr/bin/otool -l "$executable")
+    sparkle_link_count=$(printf '%s\n' "$linkage" | /usr/bin/awk -v expected="$expected_sparkle" '$1 == expected { count++ } END { print count + 0 }')
+    sparkle_reference_count=$(printf '%s\n' "$linkage" | /usr/bin/awk '$1 ~ /Sparkle[.]framework\/.*\/Sparkle$/ { count++ } END { print count + 0 }')
+    if [[ "$sparkle_link_count" -ne 1 || "$sparkle_reference_count" -ne 1 ]]; then
+        echo "ERROR: $label must link exactly once to $expected_sparkle." >&2
+        exit 1
+    fi
+
+    rpaths=$(printf '%s\n' "$load_commands" | /usr/bin/awk '
+        $1 == "cmd" && $2 == "LC_RPATH" { want_path = 1; next }
+        want_path && $1 == "path" { print $2; want_path = 0 }
+    ')
+    expected_rpath_count=$(printf '%s\n' "$rpaths" | /usr/bin/awk '$1 == "@executable_path/../Frameworks" { count++ } END { print count + 0 }')
+    if [[ "$expected_rpath_count" -ne 1 ]]; then
+        echo "ERROR: $label must contain exactly one LC_RPATH @executable_path/../Frameworks." >&2
+        exit 1
+    fi
+    if printf '%s\n%s\n' "$linkage" "$rpaths" | /usr/bin/grep -Eq '(^|[[:space:]])/[^[:space:]]*(/swift-build/|/[.]build/|/claude-md-release[.])'; then
+        echo "ERROR: $label contains an absolute scratch/build path in its linkage or rpaths." >&2
+        exit 1
+    fi
+}
+
+verify_signed_target() {
     local target="$1"
     local label="$2"
     local metadata="$WORK_DIR/${label}.codesign.txt"
     local entitlements="$WORK_DIR/${label}.entitlements.plist"
-    local plist="$target/Contents/Info.plist"
-    local executable="$target/Contents/MacOS/$EXECUTABLE_NAME"
-    local actual_identifier actual_version actual_build actual_archs
+    local actual_authority
 
-    codesign --verify --deep --strict --verbose=2 "$target"
+    codesign --verify --strict --verbose=2 "$target"
     codesign --display --verbose=4 "$target" 2>"$metadata"
 
-    if ! grep -q '^Authority=Developer ID Application:' "$metadata"; then
-        echo "ERROR: $label is not signed by a Developer ID Application certificate." >&2
+    actual_authority=$(/usr/bin/awk -F= '$1 == "Authority" { print substr($0, index($0, "=") + 1); exit }' "$metadata")
+    if [[ "$actual_authority" != "$SIGNING_NAME" ]]; then
+        echo "ERROR: $label has signing authority '${actual_authority:-missing}', expected '$SIGNING_NAME'." >&2
         exit 1
     fi
-    if ! grep -q "^TeamIdentifier=${TEAM_ID}$" "$metadata"; then
+    if ! /usr/bin/grep -Fqx "TeamIdentifier=$TEAM_ID" "$metadata"; then
         echo "ERROR: $label does not have the requested Team ID $TEAM_ID." >&2
         exit 1
     fi
-    if ! grep -Eq '^flags=.*\(runtime\)' "$metadata"; then
-        echo "ERROR: $label is missing the hardened runtime signature flag." >&2
+    if ! /usr/bin/grep -Eq '^flags=.*[(]runtime[)]' "$metadata" || \
+        ! /usr/bin/grep -Eq '^Runtime Version=.+$' "$metadata"; then
+        echo "ERROR: $label is missing the hardened runtime signature." >&2
         exit 1
     fi
-    if ! grep -Eq '^Timestamp=.+$' "$metadata" || grep -q '^Timestamp=none$' "$metadata"; then
+    if ! /usr/bin/grep -Eq '^Timestamp=.+$' "$metadata" || /usr/bin/grep -Fqx 'Timestamp=none' "$metadata"; then
         echo "ERROR: $label is missing a secure signing timestamp." >&2
         exit 1
     fi
 
-    if codesign --display --entitlements :- "$target" >"$entitlements" 2>/dev/null; then
-        if [[ -s "$entitlements" ]] && \
-            [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$entitlements" 2>/dev/null || true)" == "true" ]]; then
-            echo "ERROR: $label enables the forbidden get-task-allow entitlement." >&2
-            exit 1
-        fi
+    if ! codesign --display --entitlements :- "$target" >"$entitlements" 2>/dev/null; then
+        echo "ERROR: Could not inspect $label entitlements." >&2
+        exit 1
     fi
+    if [[ -s "$entitlements" ]] && ! /usr/bin/plutil -lint "$entitlements" >/dev/null; then
+        echo "ERROR: $label has malformed entitlements." >&2
+        exit 1
+    fi
+    if [[ -s "$entitlements" ]] && \
+        [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$entitlements" 2>/dev/null || true)" == "true" ]]; then
+        echo "ERROR: $label enables the forbidden get-task-allow entitlement." >&2
+        exit 1
+    fi
+}
+
+verify_embedded_sparkle_signatures() {
+    local app_path="$1"
+    local label_prefix="$2"
+    local version_dir="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B"
+
+    verify_signed_target "$version_dir/XPCServices/Installer.xpc" "${label_prefix}-installer-xpc"
+    verify_signed_target "$version_dir/XPCServices/Downloader.xpc" "${label_prefix}-downloader-xpc"
+    verify_signed_target "$version_dir/Autoupdate" "${label_prefix}-autoupdate"
+    verify_signed_target "$version_dir/Updater.app" "${label_prefix}-updater-app"
+    verify_signed_target "$app_path/Contents/Frameworks/Sparkle.framework" "${label_prefix}-sparkle-framework"
+}
+
+verify_developer_id_app() {
+    local target="$1"
+    local label="$2"
+    local plist="$target/Contents/Info.plist"
+    local executable="$target/Contents/MacOS/$EXECUTABLE_NAME"
+    local actual_identifier actual_version actual_build actual_archs
+    local actual_feed_url actual_public_key automatic_checks automatically_update
+    local allows_automatic_updates verify_before_extraction require_signed_feed
+    local signed_feed_failure_expiration_interval
+
+    verify_signed_target "$target" "$label"
+    codesign --verify --deep --strict --verbose=2 "$target"
 
     actual_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist" 2>/dev/null || true)
     actual_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist" 2>/dev/null || true)
     actual_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist" 2>/dev/null || true)
+    actual_feed_url=$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$plist" 2>/dev/null || true)
+    actual_public_key=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$plist" 2>/dev/null || true)
+    automatic_checks=$(/usr/libexec/PlistBuddy -c 'Print :SUEnableAutomaticChecks' "$plist" 2>/dev/null || true)
+    automatically_update=$(/usr/libexec/PlistBuddy -c 'Print :SUAutomaticallyUpdate' "$plist" 2>/dev/null || true)
+    allows_automatic_updates=$(/usr/libexec/PlistBuddy -c 'Print :SUAllowsAutomaticUpdates' "$plist" 2>/dev/null || true)
+    verify_before_extraction=$(/usr/libexec/PlistBuddy -c 'Print :SUVerifyUpdateBeforeExtraction' "$plist" 2>/dev/null || true)
+    require_signed_feed=$(/usr/libexec/PlistBuddy -c 'Print :SURequireSignedFeed' "$plist" 2>/dev/null || true)
+    signed_feed_failure_expiration_interval=$(/usr/libexec/PlistBuddy -c 'Print :SUSignedFeedFailureExpirationInterval' "$plist" 2>/dev/null || true)
     if [[ "$actual_identifier" != "com.kaanxweb.claude-md-switcher" ]]; then
         echo "ERROR: $label has unexpected bundle identifier '${actual_identifier:-missing}'." >&2
         exit 1
@@ -323,6 +531,17 @@ verify_developer_id_app() {
         echo "ERROR: $label build '${actual_build:-missing}' does not match $BUILD." >&2
         exit 1
     fi
+    if [[ "$actual_feed_url" != "https://github.com/kaanxweb/claude-md-switcher/releases/latest/download/appcast.xml" || \
+          "$actual_public_key" != "$SOURCE_PUBLIC_KEY" || \
+          "$automatic_checks" != "true" || \
+          "$automatically_update" != "false" || \
+          "$allows_automatic_updates" != "false" || \
+          "$verify_before_extraction" != "true" || \
+          "$require_signed_feed" != "true" || \
+          "$signed_feed_failure_expiration_interval" != "0" ]]; then
+        echo "ERROR: $label does not preserve the required Sparkle update trust and consent policy." >&2
+        exit 1
+    fi
     if [[ ! -x "$executable" ]]; then
         echo "ERROR: $label is missing executable $EXECUTABLE_NAME." >&2
         exit 1
@@ -332,15 +551,41 @@ verify_developer_id_app() {
         echo "ERROR: $label binary architecture is '${actual_archs:-missing}', expected arm64 only." >&2
         exit 1
     fi
+
+    verify_executable_linkage "$target" "$label"
 }
 
 echo "Signing with hardened runtime and secure timestamp..."
+SPARKLE_FRAMEWORK="$APP/Contents/Frameworks/Sparkle.framework"
+SPARKLE_VERSION_DIR="$SPARKLE_FRAMEWORK/Versions/B"
+SPARKLE_INSTALLER="$SPARKLE_VERSION_DIR/XPCServices/Installer.xpc"
+SPARKLE_DOWNLOADER="$SPARKLE_VERSION_DIR/XPCServices/Downloader.xpc"
+SPARKLE_AUTOUPDATE="$SPARKLE_VERSION_DIR/Autoupdate"
+SPARKLE_UPDATER="$SPARKLE_VERSION_DIR/Updater.app"
+
+for sparkle_component in "$SPARKLE_INSTALLER" "$SPARKLE_DOWNLOADER" "$SPARKLE_AUTOUPDATE" "$SPARKLE_UPDATER" "$SPARKLE_FRAMEWORK"; do
+    if [[ ! -e "$sparkle_component" ]]; then
+        echo "ERROR: Required embedded Sparkle component is missing: $sparkle_component" >&2
+        exit 1
+    fi
+done
+
+verify_sparkle_symlinks "$APP" "pre-notarization-app"
+verify_executable_linkage "$APP" "pre-notarization-app"
+
+codesign --force --options runtime --timestamp --sign "$SIGNING_FINGERPRINT" "$SPARKLE_INSTALLER"
+codesign --force --options runtime --timestamp --preserve-metadata=entitlements --sign "$SIGNING_FINGERPRINT" "$SPARKLE_DOWNLOADER"
+codesign --force --options runtime --timestamp --sign "$SIGNING_FINGERPRINT" "$SPARKLE_AUTOUPDATE"
+codesign --force --options runtime --timestamp --sign "$SIGNING_FINGERPRINT" "$SPARKLE_UPDATER"
+codesign --force --options runtime --timestamp --sign "$SIGNING_FINGERPRINT" "$SPARKLE_FRAMEWORK"
 codesign --force --options runtime --timestamp --sign "$SIGNING_FINGERPRINT" "$APP"
+
+verify_embedded_sparkle_signatures "$APP" "pre-notarization"
 verify_developer_id_app "$APP" "pre-notarization-app"
 
 NOTARIZE_ZIP="$WORK_DIR/ClaudeMDSwitcher-notarize.zip"
 SUBMISSION_JSON="$WORK_DIR/notary-submission.json"
-/usr/bin/ditto -c -k --keepParent "$APP" "$NOTARIZE_ZIP"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$NOTARIZE_ZIP"
 
 echo "Submitting to notarytool (this can take several minutes)..."
 set +e
@@ -389,11 +634,13 @@ fi
 echo "Stapling and validating notarization ticket..."
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
+verify_sparkle_symlinks "$APP" "stapled-app"
+verify_embedded_sparkle_signatures "$APP" "stapled"
 verify_developer_id_app "$APP" "stapled-app"
 spctl --assess --type execute --verbose=4 "$APP"
 
 FINAL_ZIP="$WORK_DIR/$RELEASE_ZIP_NAME"
-/usr/bin/ditto -c -k --keepParent "$APP" "$FINAL_ZIP"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$FINAL_ZIP"
 
 EXTRACT_DIR="$WORK_DIR/extracted"
 mkdir -p "$EXTRACT_DIR"
@@ -408,20 +655,150 @@ if [[ "$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')
     exit 1
 fi
 
+verify_sparkle_symlinks "$PACKAGED_APP" "packaged-app"
+verify_embedded_sparkle_signatures "$PACKAGED_APP" "packaged"
 verify_developer_id_app "$PACKAGED_APP" "packaged-app"
 xcrun stapler validate "$PACKAGED_APP"
 spctl --assess --type execute --verbose=4 "$PACKAGED_APP"
 
 (cd "$WORK_DIR" && /usr/bin/shasum -a 256 "$RELEASE_ZIP_NAME" >"$CHECKSUM_NAME")
 (cd "$WORK_DIR" && /usr/bin/shasum -a 256 -c "$CHECKSUM_NAME")
+FINAL_ZIP_SHA=$(/usr/bin/shasum -a 256 "$FINAL_ZIP" | /usr/bin/awk '{ print $1 }')
+
+APPCAST_STAGE="$WORK_DIR/appcast-stage"
+mkdir -p "$APPCAST_STAGE"
+STAGED_ZIP="$APPCAST_STAGE/$RELEASE_ZIP_NAME"
+STAGED_RELEASE_NOTES="$APPCAST_STAGE/${RELEASE_ZIP_NAME%.zip}.md"
+WORK_APPCAST="$APPCAST_STAGE/appcast.xml"
+DOWNLOAD_URL_PREFIX="https://github.com/kaanxweb/claude-md-switcher/releases/download/v${VERSION}/"
+EXPECTED_DOWNLOAD_URL="${DOWNLOAD_URL_PREFIX}${RELEASE_ZIP_NAME}"
+
+/usr/bin/ditto "$FINAL_ZIP" "$STAGED_ZIP"
+/usr/bin/ditto "$RELEASE_NOTES_SOURCE" "$STAGED_RELEASE_NOTES"
+if [[ "$(/usr/bin/shasum -a 256 "$STAGED_ZIP" | /usr/bin/awk '{ print $1 }')" != "$FINAL_ZIP_SHA" ]]; then
+    echo "ERROR: Staging changed the final release ZIP checksum." >&2
+    exit 1
+fi
+
+"$GENERATE_APPCAST" \
+    --account "$SPARKLE_KEY_ACCOUNT" \
+    --download-url-prefix "$DOWNLOAD_URL_PREFIX" \
+    --embed-release-notes \
+    --maximum-deltas 0 \
+    --maximum-versions 1 \
+    --versions "$BUILD" \
+    -o "$WORK_APPCAST" \
+    "$APPCAST_STAGE"
+
+if [[ "$(/usr/bin/shasum -a 256 "$FINAL_ZIP" | /usr/bin/awk '{ print $1 }')" != "$FINAL_ZIP_SHA" || \
+      "$(/usr/bin/shasum -a 256 "$STAGED_ZIP" | /usr/bin/awk '{ print $1 }')" != "$FINAL_ZIP_SHA" ]]; then
+    echo "ERROR: Appcast generation changed the final release ZIP checksum." >&2
+    exit 1
+fi
+if [[ ! -s "$WORK_APPCAST" ]]; then
+    echo "ERROR: Sparkle did not generate a non-empty appcast.xml." >&2
+    exit 1
+fi
+if ! /usr/bin/xmllint --noout "$WORK_APPCAST"; then
+    echo "ERROR: Generated appcast.xml is not valid XML." >&2
+    exit 1
+fi
+
+APPCAST_ITEM_COUNT=$(/usr/bin/xmllint --xpath 'count(//*[local-name()="item"])' "$WORK_APPCAST")
+if [[ "$APPCAST_ITEM_COUNT" != "1" ]]; then
+    echo "ERROR: Generated appcast.xml must contain exactly one item." >&2
+    exit 1
+fi
+APPCAST_ITEM='/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="item"]'
+APPCAST_BUILD=$(/usr/bin/xmllint --xpath "string(${APPCAST_ITEM}/*[local-name()='version'])" "$WORK_APPCAST")
+APPCAST_SHORT_VERSION=$(/usr/bin/xmllint --xpath "string(${APPCAST_ITEM}/*[local-name()='shortVersionString'])" "$WORK_APPCAST")
+if [[ "$APPCAST_BUILD" != "$BUILD" || "$APPCAST_SHORT_VERSION" != "$VERSION" ]]; then
+    echo "ERROR: Generated appcast version/build does not match $VERSION ($BUILD)." >&2
+    exit 1
+fi
+
+APPCAST_ENCLOSURE_COUNT=$(/usr/bin/xmllint --xpath "count(${APPCAST_ITEM}/*[local-name()='enclosure'])" "$WORK_APPCAST")
+if [[ "$APPCAST_ENCLOSURE_COUNT" != "1" ]]; then
+    echo "ERROR: Generated appcast item must contain exactly one enclosure." >&2
+    exit 1
+fi
+APPCAST_ENCLOSURE="${APPCAST_ITEM}/*[local-name()='enclosure']"
+APPCAST_URL=$(/usr/bin/xmllint --xpath "string(${APPCAST_ENCLOSURE}/@url)" "$WORK_APPCAST")
+APPCAST_LENGTH=$(/usr/bin/xmllint --xpath "string(${APPCAST_ENCLOSURE}/@length)" "$WORK_APPCAST")
+APPCAST_SIGNATURE=$(/usr/bin/xmllint --xpath "string(${APPCAST_ENCLOSURE}/@*[local-name()='edSignature'])" "$WORK_APPCAST")
+ARCHIVE_LENGTH=$(/usr/bin/stat -f '%z' "$STAGED_ZIP")
+if [[ "$APPCAST_URL" != "$EXPECTED_DOWNLOAD_URL" || "${APPCAST_URL##*/}" != "$RELEASE_ZIP_NAME" ]]; then
+    echo "ERROR: Appcast enclosure URL is not the immutable tag-specific archive URL." >&2
+    exit 1
+fi
+if [[ "$APPCAST_LENGTH" != "$ARCHIVE_LENGTH" ]]; then
+    echo "ERROR: Appcast enclosure length does not match $RELEASE_ZIP_NAME." >&2
+    exit 1
+fi
+if [[ -z "$APPCAST_SIGNATURE" ]]; then
+    echo "ERROR: Appcast enclosure is missing its EdDSA signature." >&2
+    exit 1
+fi
+
+MINIMUM_SYSTEM_COUNT=$(/usr/bin/xmllint --xpath "count(${APPCAST_ITEM}/*[local-name()='minimumSystemVersion'])" "$WORK_APPCAST")
+MINIMUM_SYSTEM_VERSION=$(/usr/bin/xmllint --xpath "string(${APPCAST_ITEM}/*[local-name()='minimumSystemVersion'])" "$WORK_APPCAST")
+if [[ "$MINIMUM_SYSTEM_COUNT" != "1" || "$MINIMUM_SYSTEM_VERSION" != "14.0" ]]; then
+    echo "ERROR: Appcast must require exactly macOS 14.0 or later." >&2
+    exit 1
+fi
+HARDWARE_REQUIREMENTS_COUNT=$(/usr/bin/xmllint --xpath "count(${APPCAST_ITEM}/*[local-name()='hardwareRequirements'])" "$WORK_APPCAST")
+HARDWARE_REQUIREMENTS=$(/usr/bin/xmllint --xpath "string(${APPCAST_ITEM}/*[local-name()='hardwareRequirements'])" "$WORK_APPCAST")
+if [[ "$HARDWARE_REQUIREMENTS_COUNT" != "1" || "$HARDWARE_REQUIREMENTS" != "arm64" ]]; then
+    echo "ERROR: Generated appcast must contain exactly one arm64 hardware requirement." >&2
+    exit 1
+fi
+
+APPCAST_DESCRIPTION_COUNT=$(/usr/bin/xmllint --xpath "count(${APPCAST_ITEM}/*[local-name()='description'])" "$WORK_APPCAST")
+APPCAST_RELEASE_NOTES_LINK_COUNT=$(/usr/bin/xmllint --xpath "count(${APPCAST_ITEM}/*[local-name()='releaseNotesLink'])" "$WORK_APPCAST")
+APPCAST_NOTES_FORMAT=$(/usr/bin/xmllint --xpath "string(${APPCAST_ITEM}/*[local-name()='description']/@*[local-name()='format'])" "$WORK_APPCAST")
+APPCAST_NOTES=$(/usr/bin/xmllint --xpath "string(${APPCAST_ITEM}/*[local-name()='description'])" "$WORK_APPCAST")
+EXPECTED_NOTES=$(/bin/cat "$RELEASE_NOTES_SOURCE")
+if [[ "$APPCAST_DESCRIPTION_COUNT" != "1" || "$APPCAST_RELEASE_NOTES_LINK_COUNT" != "0" || \
+      "$APPCAST_NOTES_FORMAT" != "markdown" || -z "$APPCAST_NOTES" || "$APPCAST_NOTES" != "$EXPECTED_NOTES" ]]; then
+    echo "ERROR: Appcast does not contain the exact embedded Markdown release notes." >&2
+    exit 1
+fi
+APPCAST_DELTAS_COUNT=$(/usr/bin/xmllint --xpath "count(${APPCAST_ITEM}/*[local-name()='deltas'])" "$WORK_APPCAST")
+if [[ "$APPCAST_DELTAS_COUNT" != "0" ]]; then
+    echo "ERROR: Generated appcast unexpectedly contains delta updates." >&2
+    exit 1
+fi
+
+SIGNED_FEED_BLOCK_COUNT=$(/usr/bin/grep -c '^<!-- sparkle-signatures:$' "$WORK_APPCAST" || true)
+if [[ "$SIGNED_FEED_BLOCK_COUNT" != "1" ]] || \
+    ! /usr/bin/grep -Eq '^edSignature: [A-Za-z0-9+/]{86}==$' "$WORK_APPCAST" || \
+    ! /usr/bin/grep -Eq '^length: [1-9][0-9]*$' "$WORK_APPCAST"; then
+    echo "ERROR: Generated appcast is missing a valid embedded signed-feed block." >&2
+    exit 1
+fi
+
+if ! "$SIGN_UPDATE" --account "$SPARKLE_KEY_ACCOUNT" --verify "$WORK_APPCAST"; then
+    echo "ERROR: Sparkle signed-feed verification failed for appcast.xml." >&2
+    exit 1
+fi
+if ! "$SIGN_UPDATE" --account "$SPARKLE_KEY_ACCOUNT" --verify "$STAGED_ZIP" "$APPCAST_SIGNATURE"; then
+    echo "ERROR: Sparkle archive signature verification failed for $RELEASE_ZIP_NAME." >&2
+    exit 1
+fi
 
 # Promote only the fully verified bundle and its matching release files. If any
 # move fails, the EXIT trap removes every partial public promotion.
 mv "$APP" "$PUBLIC_APP"
 mv "$FINAL_ZIP" "$PUBLIC_RELEASE_ZIP"
 mv "$WORK_DIR/$CHECKSUM_NAME" "$PUBLIC_CHECKSUM"
+mv "$WORK_APPCAST" "$PUBLIC_APPCAST"
 (cd "$ROOT" && /usr/bin/shasum -a 256 -c "$CHECKSUM_NAME")
+if [[ "$(/usr/bin/shasum -a 256 "$PUBLIC_RELEASE_ZIP" | /usr/bin/awk '{ print $1 }')" != "$FINAL_ZIP_SHA" ]]; then
+    echo "ERROR: Promoted release ZIP checksum changed unexpectedly." >&2
+    exit 1
+fi
 RELEASE_SUCCEEDED=1
 
 echo "Built: $PUBLIC_RELEASE_ZIP (Developer ID signed + notarized + stapled)"
 echo "Checksum: $PUBLIC_CHECKSUM"
+echo "Appcast: $PUBLIC_APPCAST (EdDSA signed)"

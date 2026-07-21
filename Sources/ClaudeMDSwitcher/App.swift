@@ -6,6 +6,7 @@ import ServiceManagement
 struct ClaudeMDSwitcherApp: App {
     @StateObject private var store = ProfileStore()
     @StateObject private var loginItem = LoginItemController()
+    @StateObject private var updater = UpdaterController()
 
     var body: some Scene {
         MenuBarExtra {
@@ -51,6 +52,11 @@ struct ClaudeMDSwitcherApp: App {
                 loginItem.openLoginItemsSettings()
             }
         }
+        Divider()
+        Button("Check for Updates…") {
+            updater.checkForUpdates()
+        }
+        .disabled(!updater.canCheckForUpdates)
         Divider()
         Button("Quit") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
