@@ -12,10 +12,11 @@ open ClaudeMDSwitcher.app
 ## Test
 
 ```bash
-swift tests/test_swap.swift
+swift test
+bash tests/test_release_script.sh
 ```
 
-The test exercises the symlink-swap logic in a sandboxed temp directory; it does not touch your real `~/.claude/`.
+The Swift test exercises the symlink-swap logic in a sandboxed temp directory; it does not touch your real `~/.claude/`. The shell test exercises fail-closed argument, credential, stale-artifact, and signed-tag/provenance preflight behavior in a temporary copy; it does not build, sign, or modify release artifacts.
 
 ## Style
 
@@ -25,7 +26,7 @@ The test exercises the symlink-swap logic in a sandboxed temp directory; it does
 ## PRs
 
 - One concern per PR.
-- Run `swift tests/test_swap.swift` before opening.
+- Run `swift test` before opening.
 - Describe the user-visible change in the PR body, even if small.
 
 ## License

@@ -2,6 +2,18 @@
 
 All notable changes to ClaudeMDSwitcher are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — Unreleased
+
+### Security
+- Hardened the distribution process to require Developer ID Application signing, Apple notarization, and ticket stapling; release builds now fail closed instead of falling back to ad-hoc signing.
+- Moved notarization credentials to a local Keychain profile and required a clean checkout at the exact signed, annotated version tag before building.
+- Added packaged bundle-identifier, version, build-number, arm64 architecture, checksum, and draft-release verification gates before publication.
+
+### Fixed
+- Preserved a later regular `~/.claude/CLAUDE.md` as a uniquely named recovery profile when `CLAUDE.default.md` already exists, avoiding content loss during profile switching.
+
+There are no new application features in this release. v1.0.1 uses build number 2 and is intended to be the first Developer ID-signed and notarized release.
+
 ## [1.0.0] — 2026-05-14
 
 ### Added
