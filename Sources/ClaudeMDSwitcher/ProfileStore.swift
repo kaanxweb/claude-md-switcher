@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import Combine
+import ClaudeMDSwitcherCore
 
 struct Profile: Identifiable, Equatable {
     let url: URL
@@ -30,7 +31,6 @@ final class ProfileStore: ObservableObject {
 
     let claudeDir: URL
     private let mainFile: URL
-    private let defaultBackup: URL
     private let watcher = DirectoryWatcher()
     private var debounceItem: DispatchWorkItem?
 
@@ -38,7 +38,6 @@ final class ProfileStore: ObservableObject {
         let home = FileManager.default.homeDirectoryForCurrentUser
         self.claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
         self.mainFile = claudeDir.appendingPathComponent("CLAUDE.md")
-        self.defaultBackup = claudeDir.appendingPathComponent("CLAUDE.default.md")
 
         rescan()
 
@@ -95,38 +94,8 @@ final class ProfileStore: ObservableObject {
     }
 
     func activate(_ profile: Profile) {
-        let fm = FileManager.default
-
         do {
-            // Step 1: if CLAUDE.md exists and is a regular file (not a symlink), back it up.
-            if fm.fileExists(atPath: mainFile.path) {
-                let attrs = try fm.attributesOfItem(atPath: mainFile.path)
-                let type = attrs[.type] as? FileAttributeType
-                if type != .typeSymbolicLink {
-                    if !fm.fileExists(atPath: defaultBackup.path) {
-                        try fm.moveItem(at: mainFile, to: defaultBackup)
-                    } else {
-                        // Backup already exists — discard the current regular file.
-                        try fm.removeItem(at: mainFile)
-                    }
-                }
-            }
-
-            // Step 2: atomic symlink swap via temp + rename(2).
-            // FileManager.replaceItemAt fails when the original is a symlink
-            // (NSCocoaErrorDomain 4), so use POSIX rename which atomically
-            // overwrites any existing entry — symlink or regular file.
-            let tempName = ".CLAUDE.md.swap-\(UUID().uuidString)"
-            let tempURL = claudeDir.appendingPathComponent(tempName)
-            // Use relative target so the link is portable within ~/.claude/
-            try fm.createSymbolicLink(atPath: tempURL.path, withDestinationPath: profile.url.lastPathComponent)
-
-            if rename(tempURL.path, mainFile.path) != 0 {
-                let err = String(cString: strerror(errno))
-                try? fm.removeItem(at: tempURL)
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "rename failed: \(err)"])
-            }
-
+            try ProfileActivation.activate(profileURL: profile.url, in: claudeDir)
             self.activePath = profile.url.standardizedFileURL
         } catch {
             FileHandle.standardError.write(Data("[ClaudeMDSwitcher] activate failed: \(error)\n".utf8))

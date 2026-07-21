@@ -22,7 +22,9 @@ _(GIF placeholder — will be added in a future release.)_
 
 1. Grab the latest `ClaudeMDSwitcher-vX.Y.Z-arm64.zip` from [Releases](https://github.com/kaanxweb/claude-md-switcher/releases/latest).
 2. Unzip, drag `ClaudeMDSwitcher.app` into `/Applications`.
-3. Right-click → **Open** the first time (Gatekeeper warning is expected for ad-hoc signed builds — see [Why right-click → Open?](#why-right-click--open)).
+3. Open the app according to the downloaded version:
+   - **v1.0.0 (the current release):** it is ad-hoc signed, so on first launch right-click `ClaudeMDSwitcher.app`, choose **Open**, then confirm **Open**. Do not remove its quarantine metadata.
+   - **v1.0.1 and later, once published:** these builds are intended to be Developer ID-signed and notarized. Double-click `ClaudeMDSwitcher.app` normally.
 4. The stacked-cubes icon should appear in your menu bar.
 
 ### Option B — Build from source
@@ -65,36 +67,142 @@ cd claude-md-switcher
 open ClaudeMDSwitcher.app
 ```
 
-For a versioned release build (used by CI):
+Production releases require Developer ID signing and notarization. Maintainers should follow [Maintainer release process](#maintainer-release-process); `release.sh` intentionally has no ad-hoc production fallback.
+
+## Maintainer release process
+
+The planned v1.0.1 (build 2) is the first Developer ID-signed, notarized, and stapled release. This section describes how to prepare it; it does not mean v1.0.1 has already been published.
+
+### 1. Prepare signing and notarization locally
+
+Install the repository maintainer's **Developer ID Application** certificate and its private key in the local login Keychain. Create an app-specific password for the Apple ID, then store it in a local `notarytool` Keychain profile:
 
 ```bash
-./release.sh --version 1.0.0
+xcrun notarytool store-credentials "ClaudeMDSwitcher-notary" \
+  --apple-id "maintainer@example.com" \
+  --team-id "TEAMID1234"
 ```
 
-## Future: Developer ID signing + notarization
+Enter the app-specific password only at the interactive prompt. Do not put it on the command line, in an environment variable, or in a repository file.
 
-v1 ships with ad-hoc signing — Gatekeeper warns on first launch. To produce notarized builds (no warning):
+Do not provision this repository's GitHub Actions by exporting or uploading the Developer ID private key, or by storing a raw Apple password or app-specific password there. The release is signed and notarized on the trusted maintainer Mac; GitHub receives only the finished artifact.
 
-1. Get an Apple Developer ID Application certificate ($99/year).
-2. Generate an app-specific password at [appleid.apple.com](https://appleid.apple.com).
-3. Set three environment variables (or GitHub Actions secrets for CI):
-   - `APPLE_TEAM_ID`
-   - `APPLE_ID`
-   - `APPLE_APP_PASSWORD`
-4. Re-run `./release.sh --version X.Y.Z` — `notarytool` handles the rest.
+### 2. Create and verify the local signed, annotated release tag
 
-The GitHub Actions release workflow already reads these as secrets; setting them in repo Settings → Secrets and variables → Actions is enough to enable notarization for future tagged releases.
+Start from the exact release commit with no tracked or untracked changes. The status command must print nothing:
 
-## Why right-click → Open?
+```bash
+git fetch origin
+git status --porcelain --untracked-files=all
+git tag -s v1.0.1 -m "ClaudeMDSwitcher 1.0.1"
+git tag -v v1.0.1
+test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 v1.0.1)"
+```
 
-The v1 release uses ad-hoc code signing because I don't yet have an Apple Developer ID. macOS Gatekeeper treats ad-hoc-signed downloads as untrusted on first launch. Right-click → **Open** bypasses this check once — subsequent launches work normally. Future releases will be notarized.
+Keep the signed tag local for now. Do not push it until the artifact built from this exact commit has passed verification and the hardened workflow is present on the default branch.
+
+### 3. Build and verify the tagged source
+
+Check out the local tag directly, confirm the checkout is still clean, then build:
+
+```bash
+git checkout --detach v1.0.1
+test -z "$(git status --porcelain --untracked-files=all)"
+test "$(git describe --exact-match --tags HEAD)" = "v1.0.1"
+
+./release.sh \
+  --version 1.0.1 \
+  --build 2 \
+  --team-id TEAMID1234 \
+  --notary-profile ClaudeMDSwitcher-notary
+
+codesign --verify --deep --strict --verbose=2 ClaudeMDSwitcher.app
+codesign -dv --verbose=4 ClaudeMDSwitcher.app 2>&1
+xcrun stapler validate ClaudeMDSwitcher.app
+spctl --assess --type execute --verbose=4 ClaudeMDSwitcher.app
+/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' ClaudeMDSwitcher.app/Contents/Info.plist
+/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ClaudeMDSwitcher.app/Contents/Info.plist
+/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' ClaudeMDSwitcher.app/Contents/Info.plist
+lipo -archs ClaudeMDSwitcher.app/Contents/MacOS/ClaudeMDSwitcher
+shasum -a 256 -c ClaudeMDSwitcher-v1.0.1-arm64.zip.sha256
+```
+
+`release.sh` fails unless the working tree is clean and `HEAD` is exactly the signed, annotated `v1.0.1` tag. It also verifies the packaged app's bundle identifier, version, build number, and arm64-only architecture. Confirm the commands above report the Developer ID Application authority, expected Team ID, `com.kaanxweb.claude-md-switcher`, `1.0.1`, `2`, and `arm64`. The bundle identifier stays unchanged because macOS and `SMAppService.mainApp` use it as the app and login-item identity.
+
+### 4. Push the verified tag and create a draft release
+
+> **Do not push a release tag while the old tag-triggered workflow can automatically publish it.** First merge and verify a hardened workflow that cannot rebuild, replace, or publish the locally verified artifact.
+
+Fetch the default branch again. Confirm the tagged commit is contained in it, and inspect its workflow before pushing:
+
+```bash
+git fetch origin main
+git merge-base --is-ancestor "$(git rev-list -n 1 v1.0.1)" origin/main
+git show origin/main:.github/workflows/release.yml
+```
+
+Only after confirming that the default-branch workflow has no tag-triggered publishing path, push the already-built and verified tag:
+
+```bash
+git push origin v1.0.1
+```
+
+Upload the already verified local zip to a **draft** GitHub release:
+
+```bash
+gh release create v1.0.1 \
+  ClaudeMDSwitcher-v1.0.1-arm64.zip \
+  ClaudeMDSwitcher-v1.0.1-arm64.zip.sha256 \
+  --draft \
+  --verify-tag \
+  --title "ClaudeMDSwitcher 1.0.1" \
+  --notes-file .github/release-notes-1.0.1.md
+```
+
+### 5. Re-download, verify, then publish
+
+Record the local checksum, download the draft asset to a fresh temporary directory, and require an exact match before publishing:
+
+```bash
+local_sha=$(shasum -a 256 ClaudeMDSwitcher-v1.0.1-arm64.zip | awk '{print $1}')
+verify_dir=$(mktemp -d)
+gh release download v1.0.1 \
+  --pattern 'ClaudeMDSwitcher-v1.0.1-arm64.zip' \
+  --dir "$verify_dir"
+gh release download v1.0.1 \
+  --pattern 'ClaudeMDSwitcher-v1.0.1-arm64.zip.sha256' \
+  --dir "$verify_dir"
+download_sha=$(shasum -a 256 "$verify_dir/ClaudeMDSwitcher-v1.0.1-arm64.zip" | awk '{print $1}')
+published_sha=$(awk '{print $1}' "$verify_dir/ClaudeMDSwitcher-v1.0.1-arm64.zip.sha256")
+test "$local_sha" = "$download_sha"
+test "$local_sha" = "$published_sha"
+
+mkdir "$verify_dir/extracted"
+/usr/bin/ditto -x -k \
+  "$verify_dir/ClaudeMDSwitcher-v1.0.1-arm64.zip" \
+  "$verify_dir/extracted"
+downloaded_app="$verify_dir/extracted/ClaudeMDSwitcher.app"
+codesign --verify --deep --strict --verbose=2 "$downloaded_app"
+xcrun stapler validate "$downloaded_app"
+spctl --assess --type execute --verbose=4 "$downloaded_app"
+/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$downloaded_app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$downloaded_app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$downloaded_app/Contents/Info.plist"
+lipo -archs "$downloaded_app/Contents/MacOS/ClaudeMDSwitcher"
+```
+
+Require the same expected bundle metadata and `arm64` output as the local artifact. If any checksum or verification differs, keep the release as a draft and investigate. If everything matches, publish the draft:
+
+```bash
+gh release edit v1.0.1 --draft=false
+```
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | No icon appears in menu bar after launch | Check `pgrep -x ClaudeMDSwitcher`. If running but invisible, your menu bar may be full — try Bartender, or kill some other status item. |
-| "App is damaged and can't be opened" | macOS quarantine. Run `xattr -dr com.apple.quarantine /Applications/ClaudeMDSwitcher.app`. |
+| "App is damaged and can't be opened" | Delete that copy and download it again from the official release. For v1.0.1+, verify the published SHA-256 checksum. Do not strip quarantine metadata or bypass an unexpected Gatekeeper warning; v1.0.0's supported first-open step is documented under [Install](#install). |
 | All profiles show ✓ | You're on a pre-v1.0 build. Re-download the latest release. |
 | Menu is empty | No `CLAUDE.*.md` files in `~/.claude/`. Create at least one. |
 | Launch at Login does nothing | First time, macOS may require approval — click **Open Login Items Settings…** (appears in the menu after the toggle is clicked) and enable the app there. |
