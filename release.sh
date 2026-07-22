@@ -468,7 +468,7 @@ verify_signed_target() {
         echo "ERROR: $label does not have the requested Team ID $TEAM_ID." >&2
         exit 1
     fi
-    if ! /usr/bin/grep -Eq '^flags=.*[(]runtime[)]' "$metadata" || \
+    if ! /usr/bin/grep -Eq '(^|[[:space:]])flags=.*[(]runtime[)]' "$metadata" || \
         ! /usr/bin/grep -Eq '^Runtime Version=.+$' "$metadata"; then
         echo "ERROR: $label is missing the hardened runtime signature." >&2
         exit 1
