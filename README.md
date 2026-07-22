@@ -23,9 +23,11 @@ _(GIF placeholder — will be added in a future release.)_
 1. Grab the latest `ClaudeMDSwitcher-vX.Y.Z-arm64.zip` from [Releases](https://github.com/kaanxweb/claude-md-switcher/releases/latest).
 2. Unzip, drag `ClaudeMDSwitcher.app` into `/Applications`.
 3. Open the app according to the downloaded version:
-   - **v1.0.0 (the current release):** it is ad-hoc signed, so on first launch right-click `ClaudeMDSwitcher.app`, choose **Open**, then confirm **Open**. Do not remove its quarantine metadata.
+   - **v1.0.0:** it is ad-hoc signed, so on first launch right-click `ClaudeMDSwitcher.app`, choose **Open**, then confirm **Open**. Do not remove its quarantine metadata. v1.0.0 cannot update itself; manually download v1.0.1 and replace the app once.
    - **v1.0.1 and later, once published:** these builds are intended to be Developer ID-signed and notarized. Double-click `ClaudeMDSwitcher.app` normally.
 4. The stacked-cubes icon should appear in your menu bar.
+
+v1.0.1 is the Sparkle trust-root release. It automatically checks the signed stable update feed and adds **Check for Updates…** to the menu. Download and installation remain user-approved; updates are not installed silently (`SUAutomaticallyUpdate=false`, `SUAllowsAutomaticUpdates=false`). Replacing or updating the app does not modify profiles in `~/.claude/`.
 
 ### Option B — Build from source
 
@@ -50,6 +52,7 @@ Click the menu bar icon. You should see **Work** and **Personal** listed. Click 
 - **Reveal in Finder** → opens `~/.claude/` in Finder.
 - **Refresh** → re-scans `~/.claude/` for profile files. The app already auto-refreshes when files are added or removed, but this is a manual fallback.
 - **Launch at Login** → toggles whether the app starts automatically when you log in. On first enable, macOS may ask you to approve in **System Settings → General → Login Items**; an "Open Login Items Settings…" item appears in the menu if approval is needed.
+- **Check for Updates…** → checks the signed stable feed and lets you approve an available download and installation. The app also checks automatically, but never installs an update silently.
 - **Quit** (⌘Q) → exits the app.
 
 ## How it works (brief)
@@ -73,7 +76,7 @@ Production releases require Developer ID signing and notarization. Maintainers s
 
 The planned v1.0.1 (build 2) is the first Developer ID-signed, notarized, and stapled release. This section describes how to prepare it; it does not mean v1.0.1 has already been published.
 
-### 1. Prepare signing and notarization locally
+### 1. Prepare signing, notarization, and Sparkle keys locally
 
 Install the repository maintainer's **Developer ID Application** certificate and its private key in the local login Keychain. Create an app-specific password for the Apple ID, then store it in a local `notarytool` Keychain profile:
 
@@ -87,6 +90,38 @@ Enter the app-specific password only at the interactive prompt. Do not put it on
 
 Do not provision this repository's GitHub Actions by exporting or uploading the Developer ID private key, or by storing a raw Apple password or app-specific password there. The release is signed and notarized on the trusted maintainer Mac; GitHub receives only the finished artifact.
 
+After resolving the Sparkle 2.9.4 package and building it locally, generate or retrieve the release feed key under the dedicated Keychain account:
+
+```bash
+swift package resolve
+swift build
+.build/artifacts/sparkle/Sparkle/bin/generate_keys --account kaanxweb
+```
+
+Commit only the printed public key as `SUPublicEDKey`. The Sparkle private key remains in the maintainer's login Keychain. Immediately export a backup directly to a mounted encrypted offline volume, with owner-only access (replace the example volume name):
+
+```bash
+sparkle_backup_volume='/Volumes/Encrypted Release Keys'
+sparkle_backup="$sparkle_backup_volume/claude-md-switcher-sparkle-private-key"
+test -d "$sparkle_backup_volume"
+(
+  umask 077
+  .build/artifacts/sparkle/Sparkle/bin/generate_keys \
+    --account kaanxweb \
+    -x "$sparkle_backup"
+)
+chmod -N "$sparkle_backup"
+chmod 600 "$sparkle_backup"
+test -s "$sparkle_backup"
+test "$(stat -f '%Lp' "$sparkle_backup")" = '600'
+test "$(stat -f '%Su' "$sparkle_backup")" = "$(id -un)"
+diskutil unmount "$sparkle_backup_volume"
+```
+
+Mount the volume again and test recovery on a controlled Mac before proceeding. Never leave an exported copy on an unencrypted internal disk or put it in this repository, GitHub Actions, or a GitHub release asset. The command above is a required setup step; this documentation does not claim that the backup already exists.
+
+The app sets `SUSignedFeedFailureExpirationInterval=0`, so a feed that fails signature validation never becomes eligible for Sparkle's recovery mode. This protects users from a compromised feed indefinitely. If every copy of the Sparkle private key is lost, automatic key rotation is intentionally unavailable: publish a recovery build on GitHub and direct users to manually install a Developer-ID-signed and notarized disk image. The current ZIP-only release pipeline is not a lost-key recovery path.
+
 ### 2. Create and verify the local signed, annotated release tag
 
 Start from the exact release commit with no tracked or untracked changes. The status command must print nothing:
@@ -94,12 +129,17 @@ Start from the exact release commit with no tracked or untracked changes. The st
 ```bash
 git fetch origin
 git status --porcelain --untracked-files=all
+ssh-add --apple-use-keychain ~/.ssh/claude_md_switcher_release_signing
+git config --local gpg.format ssh
+git config --local user.signingkey ~/.ssh/claude_md_switcher_release_signing.pub
+git config --local gpg.ssh.allowedSignersFile .github/release-signers
+git config --local tag.gpgSign true
 git tag -s v1.0.1 -m "ClaudeMDSwitcher 1.0.1"
 git tag -v v1.0.1
 test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 v1.0.1)"
 ```
 
-Keep the signed tag local for now. Do not push it until the artifact built from this exact commit has passed verification and the hardened workflow is present on the default branch.
+The authorized release key is pinned in `.github/release-signers` with fingerprint `SHA256:PAF5hWTFuJzAFzhrjE0AgmsEl+5DHOTsyixO2zD1PLg`. `release.sh` rejects a cryptographically valid tag from any other key. Keep the signed tag local for now. Do not push it until the artifact built from this exact commit has passed verification and the hardened workflow is present on the default branch.
 
 ### 3. Build and verify the tagged source
 
@@ -114,7 +154,8 @@ test "$(git describe --exact-match --tags HEAD)" = "v1.0.1"
   --version 1.0.1 \
   --build 2 \
   --team-id TEAMID1234 \
-  --notary-profile ClaudeMDSwitcher-notary
+  --notary-profile ClaudeMDSwitcher-notary \
+  --sparkle-key-account kaanxweb
 
 codesign --verify --deep --strict --verbose=2 ClaudeMDSwitcher.app
 codesign -dv --verbose=4 ClaudeMDSwitcher.app 2>&1
@@ -125,9 +166,14 @@ spctl --assess --type execute --verbose=4 ClaudeMDSwitcher.app
 /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' ClaudeMDSwitcher.app/Contents/Info.plist
 lipo -archs ClaudeMDSwitcher.app/Contents/MacOS/ClaudeMDSwitcher
 shasum -a 256 -c ClaudeMDSwitcher-v1.0.1-arm64.zip.sha256
+.build/artifacts/sparkle/Sparkle/bin/sign_update \
+  --account kaanxweb \
+  --verify appcast.xml
 ```
 
-`release.sh` fails unless the working tree is clean and `HEAD` is exactly the signed, annotated `v1.0.1` tag. It also verifies the packaged app's bundle identifier, version, build number, and arm64-only architecture. Confirm the commands above report the Developer ID Application authority, expected Team ID, `com.kaanxweb.claude-md-switcher`, `1.0.1`, `2`, and `arm64`. The bundle identifier stays unchanged because macOS and `SMAppService.mainApp` use it as the app and login-item identity.
+`release.sh` emits `ClaudeMDSwitcher.app`, the release ZIP, its checksum, the retained notarization log, and `appcast.xml`. It fails unless the working tree is clean and `HEAD` is exactly the signed, annotated `v1.0.1` tag. It also verifies the packaged app's bundle identifier, version, build number, arm64-only architecture, and signed Sparkle feed, and fails on a public/private Sparkle key mismatch or an unsigned or malformed feed. Confirm the commands above report the Developer ID Application authority, expected Team ID, `com.kaanxweb.claude-md-switcher`, `1.0.1`, `2`, and `arm64`. The bundle identifier stays unchanged because macOS and `SMAppService.mainApp` use it as the app and login-item identity.
+
+The appcast enclosure must use the immutable tag-specific ZIP URL, `https://github.com/kaanxweb/claude-md-switcher/releases/download/v1.0.1/ClaudeMDSwitcher-v1.0.1-arm64.zip`. Do not hand-edit `appcast.xml` after signing it; regenerate and re-sign it instead.
 
 ### 4. Push the verified tag and create a draft release
 
@@ -147,12 +193,23 @@ Only after confirming that the default-branch workflow has no tag-triggered publ
 git push origin v1.0.1
 ```
 
-Upload the already verified local zip to a **draft** GitHub release:
+Before creating the trust-root release, enable **Settings → General → Releases → Enable release immutability** for the repository. Immutability applies only to releases published after it is enabled. Confirm the API reports `true`:
+
+```bash
+test "$(gh api \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2026-03-10' \
+  repos/kaanxweb/claude-md-switcher/immutable-releases \
+  --jq '.enabled')" = 'true'
+```
+
+Upload the already verified local ZIP, checksum, and signed appcast to a **draft** GitHub release:
 
 ```bash
 gh release create v1.0.1 \
   ClaudeMDSwitcher-v1.0.1-arm64.zip \
   ClaudeMDSwitcher-v1.0.1-arm64.zip.sha256 \
+  appcast.xml \
   --draft \
   --verify-tag \
   --title "ClaudeMDSwitcher 1.0.1" \
@@ -161,21 +218,26 @@ gh release create v1.0.1 \
 
 ### 5. Re-download, verify, then publish
 
-Record the local checksum, download the draft asset to a fresh temporary directory, and require an exact match before publishing:
+Record the local ZIP and appcast hashes, download all three draft assets to a fresh temporary directory, and require exact matches before publishing:
 
 ```bash
 local_sha=$(shasum -a 256 ClaudeMDSwitcher-v1.0.1-arm64.zip | awk '{print $1}')
+local_appcast_sha=$(shasum -a 256 appcast.xml | awk '{print $1}')
 verify_dir=$(mktemp -d)
 gh release download v1.0.1 \
   --pattern 'ClaudeMDSwitcher-v1.0.1-arm64.zip' \
-  --dir "$verify_dir"
-gh release download v1.0.1 \
   --pattern 'ClaudeMDSwitcher-v1.0.1-arm64.zip.sha256' \
+  --pattern 'appcast.xml' \
   --dir "$verify_dir"
 download_sha=$(shasum -a 256 "$verify_dir/ClaudeMDSwitcher-v1.0.1-arm64.zip" | awk '{print $1}')
 published_sha=$(awk '{print $1}' "$verify_dir/ClaudeMDSwitcher-v1.0.1-arm64.zip.sha256")
+downloaded_appcast_sha=$(shasum -a 256 "$verify_dir/appcast.xml" | awk '{print $1}')
 test "$local_sha" = "$download_sha"
 test "$local_sha" = "$published_sha"
+test "$local_appcast_sha" = "$downloaded_appcast_sha"
+.build/artifacts/sparkle/Sparkle/bin/sign_update \
+  --account kaanxweb \
+  --verify "$verify_dir/appcast.xml"
 
 mkdir "$verify_dir/extracted"
 /usr/bin/ditto -x -k \
@@ -191,11 +253,31 @@ spctl --assess --type execute --verbose=4 "$downloaded_app"
 lipo -archs "$downloaded_app/Contents/MacOS/ClaudeMDSwitcher"
 ```
 
-Require the same expected bundle metadata and `arm64` output as the local artifact. If any checksum or verification differs, keep the release as a draft and investigate. If everything matches, publish the draft:
+Require the same expected bundle metadata and `arm64` output as the local artifact. If any hash, signature, checksum, or bundle verification differs, keep the release as a draft and investigate. If everything matches, publish the draft and mark it latest:
 
 ```bash
-gh release edit v1.0.1 --draft=false
+gh release edit v1.0.1 --draft=false --latest
+gh release verify v1.0.1
+gh release verify-asset v1.0.1 "$verify_dir/ClaudeMDSwitcher-v1.0.1-arm64.zip"
+gh release verify-asset v1.0.1 "$verify_dir/ClaudeMDSwitcher-v1.0.1-arm64.zip.sha256"
+gh release verify-asset v1.0.1 "$verify_dir/appcast.xml"
 ```
+
+Finally, fetch the exact feed URL used by installed apps, compare it to the local signed appcast, and verify its embedded signature again:
+
+```bash
+stable_feed_url='https://github.com/kaanxweb/claude-md-switcher/releases/latest/download/appcast.xml'
+curl --fail --location --output "$verify_dir/stable-appcast.xml" "$stable_feed_url"
+stable_appcast_sha=$(shasum -a 256 "$verify_dir/stable-appcast.xml" | awk '{print $1}')
+test "$local_appcast_sha" = "$stable_appcast_sha"
+.build/artifacts/sparkle/Sparkle/bin/sign_update \
+  --account kaanxweb \
+  --verify "$verify_dir/stable-appcast.xml"
+```
+
+Every future latest stable release must include a freshly generated, signed `appcast.xml` whose enclosure points to that release's immutable tag-specific ZIP URL. Never hand-edit an appcast after signing it.
+
+After the published assets and retained notarization log have been copied to their long-term release records, remove the local generated app, ZIP, checksum, appcast, and notarization log before preparing the next release. These outputs are ignored by Git and are regenerated for each version.
 
 ## Troubleshooting
 

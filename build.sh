@@ -25,14 +25,26 @@ while [[ $# -gt 0 ]]; do
 done
 
 APP="ClaudeMDSwitcher.app"
-BIN=".build/release/ClaudeMDSwitcher"
 
 swift build -c release --arch arm64
+BIN_DIR=$(swift build -c release --arch arm64 --show-bin-path)
+BIN="$BIN_DIR/ClaudeMDSwitcher"
+SPARKLE_FRAMEWORK="$BIN_DIR/Sparkle.framework"
+
+if [[ ! -x "$BIN" ]]; then
+    echo "ERROR: Built executable not found: $BIN" >&2
+    exit 1
+fi
+if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
+    echo "ERROR: Sparkle framework not found: $SPARKLE_FRAMEWORK" >&2
+    exit 1
+fi
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN" "$APP/Contents/MacOS/ClaudeMDSwitcher"
 cp Sources/ClaudeMDSwitcher/Info.plist "$APP/Contents/Info.plist"
+/usr/bin/ditto "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/Sparkle.framework"
 
 PLIST="$APP/Contents/Info.plist"
 if [[ -n "$SHORT_VERSION" ]]; then
@@ -47,6 +59,9 @@ if [[ -f scripts/generate_icon.swift ]]; then
     swift scripts/generate_icon.swift
 fi
 
-codesign --force --deep --sign - "$APP"
+# Sparkle's nested components arrive signed. Sign only the outer development
+# app so their entitlements and component signatures remain intact.
+codesign --force --sign - "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo "Built: $(pwd)/$APP (ad-hoc signed)"

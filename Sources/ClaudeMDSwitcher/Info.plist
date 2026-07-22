@@ -26,5 +26,21 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/kaanxweb/claude-md-switcher/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>7vAYglRueD8kEJPe35M+tyxs5Xg7b/IkKnY0jFNkjzI=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+    <key>SUAllowsAutomaticUpdates</key>
+    <false/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUSignedFeedFailureExpirationInterval</key>
+    <integer>0</integer>
 </dict>
 </plist>

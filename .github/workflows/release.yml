@@ -21,8 +21,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve Swift dependencies without lockfile drift
+        run: |
+          git ls-files --error-unmatch Package.resolved >/dev/null
+          swift package resolve
+          git diff --exit-code -- Package.resolved
+
       - name: Check shell syntax
-        run: bash -n build.sh release.sh
+        run: bash -n build.sh release.sh tests/*.sh
 
       - name: Run Swift tests
         run: swift test
@@ -30,5 +36,5 @@ jobs:
       - name: Run release-script test
         run: bash tests/test_release_script.sh
 
-      - name: Build release for arm64
-        run: swift build -c release --arch arm64
+      - name: Run bundle-packaging test
+        run: bash tests/test_bundle_packaging.sh
