@@ -240,16 +240,25 @@ if [[ ! -s "$RELEASE_SIGNERS_FILE" ]]; then
     echo "ERROR: Authorized release signer allowlist is missing or empty: $RELEASE_SIGNERS_FILE" >&2
     exit 1
 fi
-TAG_VERIFY_OUTPUT=$(LC_ALL=C git \
+TAG_VERIFY_STATUS="$WORK_DIR/tag-verifier-status.txt"
+if ! LC_ALL=C git \
     -c gpg.format=ssh \
     -c gpg.ssh.allowedSignersFile="$RELEASE_SIGNERS_FILE" \
-    tag -v "$EXPECTED_TAG" 2>&1) || {
-    printf '%s\n' "$TAG_VERIFY_OUTPUT" >&2
+    verify-tag --raw "$EXPECTED_TAG" >/dev/null 2>"$TAG_VERIFY_STATUS"; then
+    cat "$TAG_VERIFY_STATUS" >&2
     echo "ERROR: Signature verification failed for release tag $EXPECTED_TAG." >&2
     exit 1
-}
-printf '%s\n' "$TAG_VERIFY_OUTPUT"
-if ! grep -Fq "Good \"git\" signature for kaanxweb with ED25519 key $AUTHORIZED_TAG_SIGNER_FINGERPRINT" <<<"$TAG_VERIFY_OUTPUT"; then
+fi
+cat "$TAG_VERIFY_STATUS"
+VERIFIED_TAG_SIGNER_FINGERPRINT=$(sed -nE \
+    's/^Good "git" signature for .+ with ED25519 key (SHA256:[A-Za-z0-9+\/=]+)$/\1/p' \
+    "$TAG_VERIFY_STATUS")
+VERIFIED_TAG_SIGNER_COUNT=$(printf '%s\n' "$VERIFIED_TAG_SIGNER_FINGERPRINT" | awk 'NF { count++ } END { print count + 0 }')
+if [[ "$VERIFIED_TAG_SIGNER_COUNT" -ne 1 ]]; then
+    echo "ERROR: Git did not report exactly one verified ED25519 release-tag signer fingerprint." >&2
+    exit 1
+fi
+if [[ "$VERIFIED_TAG_SIGNER_FINGERPRINT" != "$AUTHORIZED_TAG_SIGNER_FINGERPRINT" ]]; then
     echo "ERROR: Release tag $EXPECTED_TAG was not signed by the authorized maintainer key $AUTHORIZED_TAG_SIGNER_FINGERPRINT." >&2
     exit 1
 fi

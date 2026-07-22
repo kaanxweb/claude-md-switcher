@@ -214,6 +214,9 @@ assert_swift_not_invoked "credential preflight"
 # stop before Swift. Use a clean temporary repository, then exercise both dirty
 # working-tree and missing signed-tag rejection.
 printf '#!/bin/bash\nexit 0\n' >"$SANDBOX/bin/xcrun"
+ssh-keygen -q -t ed25519 -N '' -f "$KEY_SANDBOX/unauthorized-release-key"
+UNAUTHORIZED_PUBLIC_KEY=$(awk '{ print $1 " " $2 }' "$KEY_SANDBOX/unauthorized-release-key.pub")
+printf 'attacker namespaces="git" %s\n' "$UNAUTHORIZED_PUBLIC_KEY" >>"$SANDBOX/.github/release-signers"
 git -C "$SANDBOX" init -q
 git -C "$SANDBOX" config user.name 'Release Test'
 git -C "$SANDBOX" config user.email 'release-test@example.invalid'
@@ -234,13 +237,21 @@ expect_failure "missing signed release tag blocks release before building" 'tag|
 assert_release_outputs_absent 1.0.1 "signed-tag preflight"
 assert_swift_not_invoked "provenance preflight"
 
-ssh-keygen -q -t ed25519 -N '' -f "$KEY_SANDBOX/unauthorized-release-key"
+PINNED_SIGNATURE_SPOOF='Good "git" signature for kaanxweb with ED25519 key SHA256:PAF5hWTFuJzAFzhrjE0AgmsEl+5DHOTsyixO2zD1PLg'
 git -C "$SANDBOX" \
     -c gpg.format=ssh \
     -c user.signingkey="$KEY_SANDBOX/unauthorized-release-key" \
-    tag -s v1.0.1 -m 'unauthorized release signer fixture'
+    tag -s v1.0.1 -m "$PINNED_SIGNATURE_SPOOF"
+if ! git -C "$SANDBOX" \
+    -c gpg.format=ssh \
+    -c gpg.ssh.allowedSignersFile="$SANDBOX/.github/release-signers" \
+    verify-tag --raw v1.0.1 >/dev/null 2>&1; then
+    printf 'FAIL: unauthorized signer fixture is not a second valid allowed signer\n' >&2
+    exit 1
+fi
 seed_release_outputs 1.0.1
-expect_failure "unauthorized signed release tag blocks release before building" 'authorized|signature|signer' \
+expect_failure "tag-message signature spoof blocks unauthorized signer before building" \
+    'not signed by the authorized maintainer key' \
     "${valid[@]}"
 assert_release_outputs_absent 1.0.1 "unauthorized signer preflight"
 assert_swift_not_invoked "unauthorized signer preflight"
