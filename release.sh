@@ -421,13 +421,14 @@ verify_executable_linkage() {
     local app_path="$1"
     local label="$2"
     local executable="$app_path/Contents/MacOS/$EXECUTABLE_NAME"
-    local linkage load_commands rpaths sparkle_link_count sparkle_reference_count expected_rpath_count
+    local linkage linkage_paths load_commands rpaths sparkle_link_count sparkle_reference_count expected_rpath_count
     local expected_sparkle="@rpath/Sparkle.framework/Versions/B/Sparkle"
 
     linkage=$(/usr/bin/otool -L "$executable")
+    linkage_paths=$(printf '%s\n' "$linkage" | /usr/bin/awk 'NR > 1 { print $1 }')
     load_commands=$(/usr/bin/otool -l "$executable")
-    sparkle_link_count=$(printf '%s\n' "$linkage" | /usr/bin/awk -v expected="$expected_sparkle" '$1 == expected { count++ } END { print count + 0 }')
-    sparkle_reference_count=$(printf '%s\n' "$linkage" | /usr/bin/awk '$1 ~ /Sparkle[.]framework\/.*\/Sparkle$/ { count++ } END { print count + 0 }')
+    sparkle_link_count=$(printf '%s\n' "$linkage_paths" | /usr/bin/awk -v expected="$expected_sparkle" '$1 == expected { count++ } END { print count + 0 }')
+    sparkle_reference_count=$(printf '%s\n' "$linkage_paths" | /usr/bin/awk '$1 ~ /Sparkle[.]framework\/.*\/Sparkle$/ { count++ } END { print count + 0 }')
     if [[ "$sparkle_link_count" -ne 1 || "$sparkle_reference_count" -ne 1 ]]; then
         echo "ERROR: $label must link exactly once to $expected_sparkle." >&2
         exit 1
@@ -442,7 +443,7 @@ verify_executable_linkage() {
         echo "ERROR: $label must contain exactly one LC_RPATH @executable_path/../Frameworks." >&2
         exit 1
     fi
-    if printf '%s\n%s\n' "$linkage" "$rpaths" | /usr/bin/grep -Eq '(^|[[:space:]])/[^[:space:]]*(/swift-build/|/[.]build/|/claude-md-release[.])'; then
+    if printf '%s\n%s\n' "$linkage_paths" "$rpaths" | /usr/bin/grep -Eq '(^|[[:space:]])/[^[:space:]]*(/swift-build/|/[.]build/|/claude-md-release[.])'; then
         echo "ERROR: $label contains an absolute scratch/build path in its linkage or rpaths." >&2
         exit 1
     fi
