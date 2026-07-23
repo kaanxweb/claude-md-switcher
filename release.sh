@@ -24,6 +24,17 @@ require_option_value() {
     fi
 }
 
+has_exactly_one_signed_feed_marker() {
+    local marker_count
+    marker_count=$(
+        /usr/bin/grep -Fo '<!-- sparkle-signatures:' "$1" |
+            /usr/bin/wc -l |
+            /usr/bin/tr -d ' ' ||
+            true
+    )
+    [[ "${marker_count:-0}" == "1" ]]
+}
+
 VERSION=""
 BUILD=""
 TEAM_ID=""
@@ -779,8 +790,7 @@ if [[ "$APPCAST_DELTAS_COUNT" != "0" ]]; then
     exit 1
 fi
 
-SIGNED_FEED_BLOCK_COUNT=$(/usr/bin/grep -c '^<!-- sparkle-signatures:$' "$WORK_APPCAST" || true)
-if [[ "$SIGNED_FEED_BLOCK_COUNT" != "1" ]] || \
+if ! has_exactly_one_signed_feed_marker "$WORK_APPCAST" || \
     ! /usr/bin/grep -Eq '^edSignature: [A-Za-z0-9+/]{86}==$' "$WORK_APPCAST" || \
     ! /usr/bin/grep -Eq '^length: [1-9][0-9]*$' "$WORK_APPCAST"; then
     echo "ERROR: Generated appcast is missing a valid embedded signed-feed block." >&2
