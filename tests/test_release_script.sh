@@ -18,6 +18,50 @@ chmod +x "$SANDBOX/bin/xcrun" "$SANDBOX/bin/swift"
 
 pass_count=0
 
+SIGNED_FEED_MARKER_FUNCTION=$(
+    /usr/bin/sed -n \
+        '/^has_exactly_one_signed_feed_marker()/,/^}/p' \
+        "$SANDBOX/release.sh"
+)
+if [[ -z "$SIGNED_FEED_MARKER_FUNCTION" ]]; then
+    printf 'FAIL: signed-feed marker validator is missing\n' >&2
+    exit 1
+fi
+eval "$SIGNED_FEED_MARKER_FUNCTION"
+
+expect_signed_feed_marker_validity() {
+    local label=$1
+    local expected=$2
+    local content=$3
+    local fixture="$KEY_SANDBOX/signed-feed-marker-fixture"
+    local actual="invalid"
+
+    printf '%s' "$content" >"$fixture"
+    if has_exactly_one_signed_feed_marker "$fixture"; then
+        actual="valid"
+    fi
+    if [[ "$actual" != "$expected" ]]; then
+        printf 'FAIL: %s was %s, expected %s\n' "$label" "$actual" "$expected" >&2
+        exit 1
+    fi
+
+    pass_count=$((pass_count + 1))
+    printf 'ok %d - %s\n' "$pass_count" "$label"
+}
+
+expect_signed_feed_marker_validity \
+    "same-line Sparkle marker is accepted" \
+    "valid" \
+    $'</rss><!-- sparkle-signatures:\nedSignature: signature\nlength: 42\n-->\n'
+expect_signed_feed_marker_validity \
+    "missing Sparkle marker is rejected" \
+    "invalid" \
+    $'</rss>\nedSignature: signature\nlength: 42\n-->\n'
+expect_signed_feed_marker_validity \
+    "duplicate same-line Sparkle markers are rejected" \
+    "invalid" \
+    $'</rss><!-- sparkle-signatures:<!-- sparkle-signatures:\nedSignature: signature\nlength: 42\n-->\n'
+
 expect_failure() {
     local label=$1
     local diagnostic=$2

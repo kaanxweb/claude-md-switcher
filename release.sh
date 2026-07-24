@@ -24,6 +24,17 @@ require_option_value() {
     fi
 }
 
+has_exactly_one_signed_feed_marker() {
+    local marker_count
+    marker_count=$(
+        /usr/bin/grep -Fo '<!-- sparkle-signatures:' "$1" |
+            /usr/bin/wc -l |
+            /usr/bin/tr -d ' ' ||
+            true
+    )
+    [[ "${marker_count:-0}" == "1" ]]
+}
+
 VERSION=""
 BUILD=""
 TEAM_ID=""
@@ -421,13 +432,14 @@ verify_executable_linkage() {
     local app_path="$1"
     local label="$2"
     local executable="$app_path/Contents/MacOS/$EXECUTABLE_NAME"
-    local linkage load_commands rpaths sparkle_link_count sparkle_reference_count expected_rpath_count
+    local linkage linkage_paths load_commands rpaths sparkle_link_count sparkle_reference_count expected_rpath_count
     local expected_sparkle="@rpath/Sparkle.framework/Versions/B/Sparkle"
 
     linkage=$(/usr/bin/otool -L "$executable")
+    linkage_paths=$(printf '%s\n' "$linkage" | /usr/bin/awk 'NR > 1 { print $1 }')
     load_commands=$(/usr/bin/otool -l "$executable")
-    sparkle_link_count=$(printf '%s\n' "$linkage" | /usr/bin/awk -v expected="$expected_sparkle" '$1 == expected { count++ } END { print count + 0 }')
-    sparkle_reference_count=$(printf '%s\n' "$linkage" | /usr/bin/awk '$1 ~ /Sparkle[.]framework\/.*\/Sparkle$/ { count++ } END { print count + 0 }')
+    sparkle_link_count=$(printf '%s\n' "$linkage_paths" | /usr/bin/awk -v expected="$expected_sparkle" '$1 == expected { count++ } END { print count + 0 }')
+    sparkle_reference_count=$(printf '%s\n' "$linkage_paths" | /usr/bin/awk '$1 ~ /Sparkle[.]framework\/.*\/Sparkle$/ { count++ } END { print count + 0 }')
     if [[ "$sparkle_link_count" -ne 1 || "$sparkle_reference_count" -ne 1 ]]; then
         echo "ERROR: $label must link exactly once to $expected_sparkle." >&2
         exit 1
@@ -442,7 +454,7 @@ verify_executable_linkage() {
         echo "ERROR: $label must contain exactly one LC_RPATH @executable_path/../Frameworks." >&2
         exit 1
     fi
-    if printf '%s\n%s\n' "$linkage" "$rpaths" | /usr/bin/grep -Eq '(^|[[:space:]])/[^[:space:]]*(/swift-build/|/[.]build/|/claude-md-release[.])'; then
+    if printf '%s\n%s\n' "$linkage_paths" "$rpaths" | /usr/bin/grep -Eq '(^|[[:space:]])/[^[:space:]]*(/swift-build/|/[.]build/|/claude-md-release[.])'; then
         echo "ERROR: $label contains an absolute scratch/build path in its linkage or rpaths." >&2
         exit 1
     fi
@@ -467,7 +479,7 @@ verify_signed_target() {
         echo "ERROR: $label does not have the requested Team ID $TEAM_ID." >&2
         exit 1
     fi
-    if ! /usr/bin/grep -Eq '^flags=.*[(]runtime[)]' "$metadata" || \
+    if ! /usr/bin/grep -Eq '(^|[[:space:]])flags=.*[(]runtime[)]' "$metadata" || \
         ! /usr/bin/grep -Eq '^Runtime Version=.+$' "$metadata"; then
         echo "ERROR: $label is missing the hardened runtime signature." >&2
         exit 1
@@ -778,8 +790,7 @@ if [[ "$APPCAST_DELTAS_COUNT" != "0" ]]; then
     exit 1
 fi
 
-SIGNED_FEED_BLOCK_COUNT=$(/usr/bin/grep -c '^<!-- sparkle-signatures:$' "$WORK_APPCAST" || true)
-if [[ "$SIGNED_FEED_BLOCK_COUNT" != "1" ]] || \
+if ! has_exactly_one_signed_feed_marker "$WORK_APPCAST" || \
     ! /usr/bin/grep -Eq '^edSignature: [A-Za-z0-9+/]{86}==$' "$WORK_APPCAST" || \
     ! /usr/bin/grep -Eq '^length: [1-9][0-9]*$' "$WORK_APPCAST"; then
     echo "ERROR: Generated appcast is missing a valid embedded signed-feed block." >&2
