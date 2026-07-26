@@ -6,21 +6,16 @@ import ClaudeMDSwitcherCore
 struct Profile: Identifiable, Equatable {
     let url: URL
     let displayName: String
+    let target: ProfileTarget
 
     var id: String { url.path }
 
-    init(url: URL) {
+    init(url: URL, target: ProfileTarget) {
         self.url = url
-        let filename = url.lastPathComponent
-        // CLAUDE.<name>.md -> <name> -> Titlecased
-        var name = filename
-        if name.hasPrefix("CLAUDE.") { name.removeFirst("CLAUDE.".count) }
-        if name.hasSuffix(".md") { name.removeLast(".md".count) }
-        if name.isEmpty {
-            self.displayName = filename
-        } else {
-            self.displayName = name.prefix(1).uppercased() + name.dropFirst()
-        }
+        self.target = target
+        self.displayName = target.layout.displayName(
+            forProfileFileName: url.lastPathComponent
+        )
     }
 }
 
@@ -28,88 +23,131 @@ struct Profile: Identifiable, Equatable {
 final class ProfileStore: ObservableObject {
     @Published var profiles: [Profile] = []
     @Published var activePath: URL?
+    @Published private(set) var selectedTarget: ProfileTarget
+    @Published private(set) var codexOverrideTakesPrecedence = false
 
-    let claudeDir: URL
-    private let mainFile: URL
+    private let homeDirectory: URL
+    private let defaults: UserDefaults
     private let watcher = DirectoryWatcher()
+    private let overrideWatcher = DirectoryWatcher()
     private var debounceItem: DispatchWorkItem?
 
-    init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        self.claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
-        self.mainFile = claudeDir.appendingPathComponent("CLAUDE.md")
+    init(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        defaults: UserDefaults = .standard
+    ) {
+        self.homeDirectory = homeDirectory
+        self.defaults = defaults
+        self.selectedTarget = ProfileTarget.loadSelection(from: defaults)
 
         rescan()
+        startWatchingSelectedDirectory()
+    }
 
-        watcher.start(at: claudeDir) { [weak self] in
+    private var selectedDirectory: URL {
+        homeDirectory.appendingPathComponent(selectedTarget.directoryName, isDirectory: true)
+    }
+
+    deinit {
+        watcher.stop()
+        overrideWatcher.stop()
+    }
+
+    func isActive(_ profile: Profile) -> Bool {
+        guard let active = activePath else { return false }
+        return ProfileDiscovery.fileURLsAreEquivalent(active, profile.url)
+    }
+
+    func selectTarget(_ target: ProfileTarget) {
+        guard target != selectedTarget else { return }
+
+        debounceItem?.cancel()
+        watcher.stop()
+        overrideWatcher.stop()
+        selectedTarget = target
+        target.persistSelection(to: defaults)
+        rescan()
+        startWatchingSelectedDirectory()
+    }
+
+    func rescan() {
+        let target = selectedTarget
+        let directory = selectedDirectory
+        self.profiles = ProfileDiscovery.profileURLs(in: directory, layout: target.layout)
+            .map { Profile(url: $0, target: target) }
+        self.activePath = ProfileDiscovery.activeProfileURL(in: directory, layout: target.layout)
+        self.codexOverrideTakesPrecedence =
+            target == .codex && hasNonEmptyCodexOverride(in: directory)
+    }
+
+    func refresh() {
+        rescan()
+        startWatchingSelectedDirectory()
+    }
+
+    func activate(_ profile: Profile) {
+        guard profile.target == selectedTarget else { return }
+
+        do {
+            try ProfileActivation.activate(
+                profileURL: profile.url,
+                in: selectedDirectory,
+                layout: selectedTarget.layout
+            )
+        } catch {
+            FileHandle.standardError.write(Data("[ClaudeMDSwitcher] activate failed: \(error)\n".utf8))
+        }
+        rescan()
+    }
+
+    func revealSelectedDirectory() {
+        NSWorkspace.shared.activateFileViewerSelecting([selectedDirectory])
+    }
+
+    private func startWatchingSelectedDirectory() {
+        let watchedTarget = selectedTarget
+        watcher.start(at: selectedDirectory) { [weak self] in
             Task { @MainActor in
+                guard self?.selectedTarget == watchedTarget else { return }
+                self?.scheduleRescan()
+            }
+        }
+        startWatchingCodexOverride()
+    }
+
+    private func startWatchingCodexOverride() {
+        overrideWatcher.stop()
+        guard selectedTarget == .codex else { return }
+
+        let override = selectedDirectory.appendingPathComponent("AGENTS.override.md")
+        guard (try? FileManager.default.attributesOfItem(atPath: override.path)) != nil else {
+            return
+        }
+        overrideWatcher.start(at: override) { [weak self] in
+            Task { @MainActor in
+                guard self?.selectedTarget == .codex else { return }
+                self?.overrideWatcher.stop()
                 self?.scheduleRescan()
             }
         }
     }
 
-    deinit {
-        watcher.stop()
-    }
-
-    func isActive(_ profile: Profile) -> Bool {
-        guard let active = activePath else { return false }
-        return active.standardizedFileURL.path == profile.url.standardizedFileURL.path
-    }
-
-    func rescan() {
-        let fm = FileManager.default
-        var found: [Profile] = []
-
-        if let entries = try? fm.contentsOfDirectory(at: claudeDir, includingPropertiesForKeys: nil) {
-            for entry in entries {
-                let name = entry.lastPathComponent
-                guard name.hasPrefix("CLAUDE."), name.hasSuffix(".md"), name != "CLAUDE.md" else { continue }
-                found.append(Profile(url: entry))
-            }
-        }
-
-        found.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-        self.profiles = found
-        self.activePath = resolveActivePath()
-    }
-
-    private func resolveActivePath() -> URL? {
-        let fm = FileManager.default
-        guard let attrs = try? fm.attributesOfItem(atPath: mainFile.path),
-              let type = attrs[.type] as? FileAttributeType,
-              type == .typeSymbolicLink else {
-            return nil
-        }
-        guard let dest = try? fm.destinationOfSymbolicLink(atPath: mainFile.path) else {
-            return nil
-        }
-        let destURL: URL
-        if (dest as NSString).isAbsolutePath {
-            destURL = URL(fileURLWithPath: dest)
-        } else {
-            destURL = claudeDir.appendingPathComponent(dest)
-        }
-        return destURL.standardizedFileURL
-    }
-
-    func activate(_ profile: Profile) {
+    private func hasNonEmptyCodexOverride(in directory: URL) -> Bool {
+        let override = directory.appendingPathComponent("AGENTS.override.md")
         do {
-            try ProfileActivation.activate(profileURL: profile.url, in: claudeDir)
-            self.activePath = profile.url.standardizedFileURL
+            let handle = try FileHandle(forReadingFrom: override)
+            defer { try? handle.close() }
+            return try handle.read(upToCount: 1)?.isEmpty == false
         } catch {
-            FileHandle.standardError.write(Data("[ClaudeMDSwitcher] activate failed: \(error)\n".utf8))
+            return false
         }
-    }
-
-    func revealClaudeDir() {
-        NSWorkspace.shared.activateFileViewerSelecting([claudeDir])
     }
 
     private func scheduleRescan() {
         debounceItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             self?.rescan()
+            self?.startWatchingCodexOverride()
         }
         debounceItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300), execute: item)

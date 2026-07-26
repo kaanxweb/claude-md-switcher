@@ -1,6 +1,6 @@
 # ClaudeMDSwitcher
 
-> Switch your `~/.claude/CLAUDE.md` profile from a macOS menu bar icon.
+> Switch Claude and Codex Markdown instruction profiles from a macOS menu bar icon.
 
 [![Build](https://github.com/kaanxweb/claude-md-switcher/actions/workflows/release.yml/badge.svg)](https://github.com/kaanxweb/claude-md-switcher/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -9,7 +9,7 @@
 
 ## What it does
 
-ClaudeMDSwitcher lets you keep multiple `CLAUDE.md` profiles side-by-side — one for work, one for personal projects, one per client — and swap between them with a single menu bar click. Under the hood it replaces `~/.claude/CLAUDE.md` with a symbolic link that points at the profile you picked, so every tool that reads `CLAUDE.md` (Claude Code, the Claude API, your own scripts) transparently sees the active profile.
+ClaudeMDSwitcher lets you keep separate Markdown instruction profiles for Claude and Codex — one for work, one for personal projects, one per client — and swap between them with a single menu bar click. Claude profiles activate through `~/.claude/CLAUDE.md`; Codex profiles activate through `~/.codex/AGENTS.md`. The two targets use isolated directories, backups, recovery files, and active symlinks.
 
 ## Demo
 
@@ -24,10 +24,10 @@ _(GIF placeholder — will be added in a future release.)_
 2. Unzip, drag `ClaudeMDSwitcher.app` into `/Applications`.
 3. Open the app according to the downloaded version:
    - **v1.0.0:** it is ad-hoc signed, so on first launch right-click `ClaudeMDSwitcher.app`, choose **Open**, then confirm **Open**. Do not remove its quarantine metadata. v1.0.0 cannot update itself; manually download v1.0.1 and replace the app once.
-   - **v1.0.1 and later, once published:** these builds are intended to be Developer ID-signed and notarized. Double-click `ClaudeMDSwitcher.app` normally.
+   - **v1.0.1 and later:** these builds are Developer ID-signed and notarized. Double-click `ClaudeMDSwitcher.app` normally.
 4. The stacked-cubes icon should appear in your menu bar.
 
-v1.0.1 is the Sparkle trust-root release. It automatically checks the signed stable update feed and adds **Check for Updates…** to the menu. Download and installation remain user-approved; updates are not installed silently (`SUAutomaticallyUpdate=false`, `SUAllowsAutomaticUpdates=false`). Replacing or updating the app does not modify profiles in `~/.claude/`.
+v1.0.1 is the Sparkle trust-root release. It automatically checks the signed stable update feed and adds **Check for Updates…** to the menu. Download and installation remain user-approved; updates are not installed silently (`SUAutomaticallyUpdate=false`, `SUAllowsAutomaticUpdates=false`). Replacing or updating the app does not modify profiles in `~/.claude/` or `~/.codex/`.
 
 ### Option B — Build from source
 
@@ -35,29 +35,62 @@ See [Building from source](#building-from-source).
 
 ## First-time setup
 
-Create at least two profile files alongside your `~/.claude/CLAUDE.md`:
+Create profiles for either or both targets.
+
+### Claude profiles
+
+Create `CLAUDE.<name>.md` files alongside `~/.claude/CLAUDE.md`:
 
 ```bash
+mkdir -p ~/.claude
 echo "# Work profile\nUse formal tone." > ~/.claude/CLAUDE.work.md
 echo "# Personal profile\nUse casual tone." > ~/.claude/CLAUDE.personal.md
 ```
 
-Click the menu bar icon. You should see **Work** and **Personal** listed. Click one — that's now your active profile.
+Open the menu, leave **Target: Claude** selected, then click **Work** or **Personal**.
 
 > 📦 **What happens on first switch:** your original `~/.claude/CLAUDE.md` (a regular file) is renamed to `~/.claude/CLAUDE.default.md` for safekeeping, then `~/.claude/CLAUDE.md` becomes a symlink to the profile you picked. You'll see a third menu item, **Default**, that lets you switch back to your original content anytime.
 
+### Codex profiles
+
+OpenAI documents the global instruction file as `$CODEX_HOME/AGENTS.md`; `CODEX_HOME` defaults to `~/.codex`, so the standard path is `~/.codex/AGENTS.md`. ClaudeMDSwitcher manages that standard default directory. A custom `CODEX_HOME` is not currently supported because an app launched from Finder or at login does not reliably inherit shell-only environment settings.
+
+Codex does not define a named Markdown-profile format. `AGENTS.<name>.md` is ClaudeMDSwitcher's convention; the app activates the selected file through the canonical `AGENTS.md` name:
+
+```bash
+mkdir -p ~/.codex
+echo "# Work profile\nUse formal tone." > ~/.codex/AGENTS.work.md
+echo "# Personal profile\nUse casual tone." > ~/.codex/AGENTS.personal.md
+```
+
+Open the menu, choose **Target: Codex**, then click a profile. On the first switch, an existing regular `~/.codex/AGENTS.md` is preserved as `~/.codex/AGENTS.default.md`.
+
+Codex instruction precedence still applies:
+
+- A non-empty `~/.codex/AGENTS.override.md` takes precedence over `AGENTS.md`. The app excludes and never modifies that reserved file, including case variants on case-insensitive volumes, and shows a warning while it masks the selected profile.
+- Repository and nested `AGENTS.md` or `AGENTS.override.md` files are loaded after global guidance; files closer to the working directory take precedence.
+- Codex reads its instruction chain when a run or session starts. Start a new Codex run after switching profiles.
+
+See OpenAI's [custom instructions with AGENTS.md documentation](https://learn.chatgpt.com/docs/agent-configuration/agents-md#how-codex-discovers-guidance) for the canonical path and precedence rules.
+
 ## Usage
 
-- **Click a profile** → switches `~/.claude/CLAUDE.md` to point at it. Checkmark (✓) marks the active one.
-- **Reveal in Finder** → opens `~/.claude/` in Finder.
-- **Refresh** → re-scans `~/.claude/` for profile files. The app already auto-refreshes when files are added or removed, but this is a manual fallback.
+- **Target: Claude/Codex** → selects which isolated profile set the menu shows. The selection persists across app launches; changing it does not activate a profile.
+- **Click a profile** → switches the selected target's canonical file to point at it. Checkmark (✓) marks the active profile.
+- **Reveal in Finder** → opens the selected target's directory in Finder.
+- **Refresh** → re-scans the selected target's directory and retries its directory watcher. The app already auto-refreshes when files are added or removed, but this is a manual fallback.
 - **Launch at Login** → toggles whether the app starts automatically when you log in. On first enable, macOS may ask you to approve in **System Settings → General → Login Items**; an "Open Login Items Settings…" item appears in the menu if approval is needed.
 - **Check for Updates…** → checks the signed stable feed and lets you approve an available download and installation. The app also checks automatically, but never installs an update silently.
 - **Quit** (⌘Q) → exits the app.
 
 ## How it works (brief)
 
-`~/.claude/CLAUDE.md` is replaced with a symbolic link pointing to the chosen `CLAUDE.<name>.md` file. The original is preserved as `CLAUDE.default.md`. Claude Code, Claude API tools, and any other tooling that reads `CLAUDE.md` will transparently follow the symlink.
+| Target | Profile convention | Canonical active file | Preserved original |
+|---|---|---|---|
+| Claude | `~/.claude/CLAUDE.<name>.md` | `~/.claude/CLAUDE.md` | `~/.claude/CLAUDE.default.md` |
+| Codex | `~/.codex/AGENTS.<name>.md` | `~/.codex/AGENTS.md` | `~/.codex/AGENTS.default.md` |
+
+Activation creates a relative sibling symlink, then atomically installs or exchanges it with the canonical file. A displaced regular file or unmanaged symlink is preserved as the target's default file, or as a uniquely named `*.recovered-<id>.md` file when the default already exists. Claude and Codex layouts are validated independently, so a profile from one target cannot be activated into the other.
 
 ## Building from source
 
@@ -74,7 +107,7 @@ Production releases require Developer ID signing and notarization. Maintainers s
 
 ## Maintainer release process
 
-The planned v1.0.1 (build 2) is the first Developer ID-signed, notarized, and stapled release. This section describes how to prepare it; it does not mean v1.0.1 has already been published.
+v1.0.1 (build 2) is the first Developer ID-signed, notarized, and stapled release. This section records the process used to prepare it and the requirements for future releases.
 
 ### 1. Prepare signing, notarization, and Sparkle keys locally
 
@@ -286,18 +319,35 @@ After the published assets and retained notarization log have been copied to the
 | No icon appears in menu bar after launch | Check `pgrep -x ClaudeMDSwitcher`. If running but invisible, your menu bar may be full — try Bartender, or kill some other status item. |
 | "App is damaged and can't be opened" | Delete that copy and download it again from the official release. For v1.0.1+, verify the published SHA-256 checksum. Do not strip quarantine metadata or bypass an unexpected Gatekeeper warning; v1.0.0's supported first-open step is documented under [Install](#install). |
 | All profiles show ✓ | You're on a pre-v1.0 build. Re-download the latest release. |
-| Menu is empty | No `CLAUDE.*.md` files in `~/.claude/`. Create at least one. |
+| Menu is empty | Check the selected target. Create at least one `CLAUDE.<name>.md` file in `~/.claude/` or `AGENTS.<name>.md` file in `~/.codex/`, then click **Refresh**. |
+| A Codex profile is checked but new runs ignore it | A non-empty `~/.codex/AGENTS.override.md`, a closer project instruction file, or a custom `CODEX_HOME` may be taking precedence. The app manages the standard `~/.codex/AGENTS.md`; start a new Codex run after switching. |
 | Launch at Login does nothing | First time, macOS may require approval — click **Open Login Items Settings…** (appears in the menu after the toggle is clicked) and enable the app there. |
 
 ## Uninstall
 
 1. Quit the app (menu → Quit).
 2. Drag `ClaudeMDSwitcher.app` to the Trash.
-3. Optional: restore your original CLAUDE.md from the backup:
+3. Optional: restore either original only when the canonical path still points to a switcher-managed sibling profile:
    ```bash
-   rm ~/.claude/CLAUDE.md
-   mv ~/.claude/CLAUDE.default.md ~/.claude/CLAUDE.md
+   claude_target=$(readlink ~/.claude/CLAUDE.md 2>/dev/null || true)
+   if [[ "$claude_target" == CLAUDE.*.md &&
+         "$claude_target" != */* &&
+         -e ~/.claude/CLAUDE.default.md ]]; then
+     rm ~/.claude/CLAUDE.md
+     mv ~/.claude/CLAUDE.default.md ~/.claude/CLAUDE.md
+   fi
+
+   codex_target=$(readlink ~/.codex/AGENTS.md 2>/dev/null || true)
+   if [[ "$codex_target" == AGENTS.*.md &&
+         "$codex_target" != AGENTS.[Oo][Vv][Ee][Rr][Rr][Ii][Dd][Ee].md &&
+         "$codex_target" != */* &&
+         -e ~/.codex/AGENTS.default.md ]]; then
+     rm ~/.codex/AGENTS.md
+     mv ~/.codex/AGENTS.default.md ~/.codex/AGENTS.md
+   fi
    ```
+
+The app never removes profile or recovery files, and never modifies `~/.codex/AGENTS.override.md`.
 
 ## Contributing
 

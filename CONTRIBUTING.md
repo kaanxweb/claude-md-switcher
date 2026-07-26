@@ -17,7 +17,7 @@ bash tests/test_release_script.sh
 bash tests/test_bundle_packaging.sh
 ```
 
-The Swift test exercises the symlink-swap logic in a sandboxed temp directory; it does not touch your real `~/.claude/`. The release shell test exercises fail-closed argument, credential, stale-artifact, and signed-tag/provenance preflight behavior in a temporary copy; it does not build, sign, or modify release artifacts. The bundle shell test runs the real development build, then verifies the arm64 app's Sparkle framework, metadata, linkage, symlinks, and signatures without launching the app or contacting its update feed.
+The Swift tests exercise Claude/Codex discovery, persistence, target isolation, and atomic activation/recovery in sandboxed temporary directories; they do not touch your real `~/.claude/` or `~/.codex/`. The release shell test exercises fail-closed argument, credential, stale-artifact, and signed-tag/provenance preflight behavior in a temporary copy; it does not build, sign, or modify release artifacts. The bundle shell test runs the real development build, then verifies the arm64 app's Sparkle framework, metadata, linkage, symlinks, and signatures without launching the app or contacting its update feed.
 
 ## Style
 
