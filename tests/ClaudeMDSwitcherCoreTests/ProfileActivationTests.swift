@@ -260,6 +260,22 @@ final class ProfileActivationTests: XCTestCase {
         XCTAssertTrue(try recoveryProfiles(layout: .codex).isEmpty)
     }
 
+    func testCodexSwitchingWithoutOriginalCanonicalCreatesNoBackup() throws {
+        let main = directory.appendingPathComponent("AGENTS.md")
+        let defaultFile = directory.appendingPathComponent("AGENTS.default.md")
+        let work = directory.appendingPathComponent("AGENTS.work.md")
+        let personal = directory.appendingPathComponent("AGENTS.personal.md")
+        try Data("work".utf8).write(to: work)
+        try Data("personal".utf8).write(to: personal)
+
+        try ProfileActivation.activate(profileURL: work, in: directory, layout: .codex)
+        try ProfileActivation.activate(profileURL: personal, in: directory, layout: .codex)
+
+        XCTAssertEqual(try symlinkTarget(at: main), personal.lastPathComponent)
+        XCTAssertFalse(itemExists(at: defaultFile))
+        XCTAssertTrue(try recoveryProfiles(layout: .codex).isEmpty)
+    }
+
     func testCodexRejectsFilesystemAliasesOfCanonicalAndReservedFilesBeforeMutation() throws {
         let values = try directory.resourceValues(
             forKeys: [.volumeSupportsCaseSensitiveNamesKey]
@@ -408,6 +424,121 @@ final class ProfileActivationTests: XCTestCase {
         XCTAssertEqual(try symlinkTarget(at: defaultFile), source.lastPathComponent)
         XCTAssertEqual(try Data(contentsOf: defaultFile), Data("dotfiles content".utf8))
         XCTAssertEqual(try symlinkTarget(at: main), "AGENTS.work.md")
+    }
+
+    func testManualProfileShapedCanonicalSymlinkIsPreservedAsDefault() throws {
+        let main = directory.appendingPathComponent("AGENTS.md")
+        let defaultFile = directory.appendingPathComponent("AGENTS.default.md")
+        let team = directory.appendingPathComponent("AGENTS.team.md")
+        let work = directory.appendingPathComponent("AGENTS.work.md")
+        let personal = directory.appendingPathComponent("AGENTS.personal.md")
+        try Data("team".utf8).write(to: team)
+        try Data("work".utf8).write(to: work)
+        try Data("personal".utf8).write(to: personal)
+        try FileManager.default.createSymbolicLink(
+            atPath: main.path,
+            withDestinationPath: team.lastPathComponent
+        )
+
+        try ProfileActivation.activate(
+            profileURL: work,
+            in: directory,
+            layout: .codex
+        )
+
+        XCTAssertEqual(try symlinkTarget(at: defaultFile), team.lastPathComponent)
+        XCTAssertEqual(try Data(contentsOf: defaultFile), Data("team".utf8))
+        XCTAssertEqual(try symlinkTarget(at: main), work.lastPathComponent)
+
+        try ProfileActivation.activate(
+            profileURL: personal,
+            in: directory,
+            layout: .codex
+        )
+
+        XCTAssertEqual(try symlinkTarget(at: defaultFile), team.lastPathComponent)
+        XCTAssertEqual(try symlinkTarget(at: main), personal.lastPathComponent)
+        XCTAssertTrue(try recoveryProfiles(layout: .codex).isEmpty)
+    }
+
+    func testManualProfileShapedCanonicalSymlinkUsesRecoveryWhenDefaultExists() throws {
+        let main = directory.appendingPathComponent("AGENTS.md")
+        let defaultFile = directory.appendingPathComponent("AGENTS.default.md")
+        let recovery = directory.appendingPathComponent("AGENTS.recovered-manual.md")
+        let team = directory.appendingPathComponent("AGENTS.team.md")
+        let work = directory.appendingPathComponent("AGENTS.work.md")
+        let originalDefault = Data("original default".utf8)
+        try originalDefault.write(to: defaultFile)
+        try Data("team".utf8).write(to: team)
+        try Data("work".utf8).write(to: work)
+        try FileManager.default.createSymbolicLink(
+            atPath: main.path,
+            withDestinationPath: team.lastPathComponent
+        )
+
+        var identifiers = ["temporary", "manual"].makeIterator()
+        try ProfileActivation.activate(
+            profileURL: work,
+            in: directory,
+            layout: .codex,
+            uniqueIdentifier: { identifiers.next()! }
+        )
+
+        XCTAssertEqual(try Data(contentsOf: defaultFile), originalDefault)
+        XCTAssertEqual(try symlinkTarget(at: recovery), team.lastPathComponent)
+        XCTAssertEqual(try Data(contentsOf: recovery), Data("team".utf8))
+        XCTAssertEqual(try symlinkTarget(at: main), work.lastPathComponent)
+    }
+
+    func testCodexMarkerFailureLeavesCanonicalFileUntouched() throws {
+        let main = directory.appendingPathComponent("AGENTS.md")
+        let defaultFile = directory.appendingPathComponent("AGENTS.default.md")
+        let profile = directory.appendingPathComponent("AGENTS.work.md")
+        let original = Data("original".utf8)
+        try original.write(to: main)
+        try Data("work".utf8).write(to: profile)
+
+        XCTAssertThrowsError(
+            try ProfileActivation.activate(
+                profileURL: profile,
+                in: directory,
+                layout: .codex,
+                uniqueIdentifier: { "marker-failure" },
+                markManagedLink: { _ in
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+            )
+        )
+
+        XCTAssertEqual(try Data(contentsOf: main), original)
+        XCTAssertFalse(itemExists(at: defaultFile))
+        XCTAssertFalse(
+            itemExists(
+                at: directory.appendingPathComponent(".AGENTS.md.swap-marker-failure")
+            )
+        )
+    }
+
+    func testClaudeProfileShapedCanonicalSymlinkKeepsLegacySwitchingBehavior() throws {
+        let personal = directory.appendingPathComponent("CLAUDE.personal.md")
+        let originalDefault = Data("original default".utf8)
+        try originalDefault.write(to: defaultBackup)
+        try Data("work".utf8).write(to: workProfile)
+        try Data("personal".utf8).write(to: personal)
+        try FileManager.default.createSymbolicLink(
+            atPath: mainFile.path,
+            withDestinationPath: workProfile.lastPathComponent
+        )
+
+        try ProfileActivation.activate(
+            profileURL: personal,
+            in: directory,
+            layout: .claude
+        )
+
+        XCTAssertEqual(try Data(contentsOf: defaultBackup), originalDefault)
+        XCTAssertEqual(try symlinkTarget(at: mainFile), personal.lastPathComponent)
+        XCTAssertTrue(try recoveryProfiles(layout: .claude).isEmpty)
     }
 
     func testCrossTargetProfileIsRejectedBeforeEitherTargetChanges() throws {

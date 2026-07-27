@@ -17,6 +17,10 @@ public struct ProfileActivationPartialFailure: LocalizedError {
 }
 
 public enum ProfileActivation {
+    private static let managedProfileLinkAttribute =
+        "com.kaanxweb.claude-md-switcher.managed-profile-link"
+    private static let managedProfileLinkAttributeValue: UInt8 = 1
+
     public static func activate(profileURL: URL, in claudeDirectory: URL) throws {
         try activate(
             profileURL: profileURL,
@@ -61,7 +65,8 @@ public enum ProfileActivation {
         in directory: URL,
         layout: ProfileLayout,
         uniqueIdentifier: () -> String,
-        renameItem: (String, String, AtomicRenameOperation) -> Int32 = atomicRename
+        renameItem: (String, String, AtomicRenameOperation) -> Int32 = atomicRename,
+        markManagedLink: (URL) throws -> Void = markManagedProfileSymlink
     ) throws {
         let fileManager = FileManager.default
         let mainFile = directory.appendingPathComponent(layout.mainFileName)
@@ -80,6 +85,14 @@ public enum ProfileActivation {
             atPath: temporaryURL.path,
             withDestinationPath: profileURL.lastPathComponent
         )
+        if layout == .codex {
+            do {
+                try markManagedLink(temporaryURL)
+            } catch {
+                try? fileManager.removeItem(at: temporaryURL)
+                throw error
+            }
+        }
 
         let mainExists = (try? fileManager.attributesOfItem(atPath: mainFile.path)) != nil
         if !mainExists {
@@ -201,8 +214,57 @@ public enum ProfileActivation {
         }
 
         let destinationURL = directory.appendingPathComponent(destination).standardizedFileURL
-        return destinationURL.deletingLastPathComponent().path == directory.standardizedFileURL.path &&
-            layout.isProfileFileName(destinationURL.lastPathComponent, in: directory)
+        guard destinationURL.deletingLastPathComponent().path ==
+                directory.standardizedFileURL.path,
+              layout.isProfileFileName(destinationURL.lastPathComponent, in: directory) else {
+            return false
+        }
+        return layout == .claude || hasManagedProfileSymlinkMarker(at: url)
+    }
+
+    private static func markManagedProfileSymlink(at url: URL) throws {
+        var marker = managedProfileLinkAttributeValue
+        let result: Int32 = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else {
+                errno = EINVAL
+                return -1
+            }
+            return managedProfileLinkAttribute.withCString { name in
+                withUnsafeBytes(of: &marker) { bytes in
+                    Darwin.setxattr(
+                        path,
+                        name,
+                        bytes.baseAddress,
+                        bytes.count,
+                        0,
+                        XATTR_NOFOLLOW
+                    )
+                }
+            }
+        }
+        guard result == 0 else {
+            throw posixError(errno, operation: "managed-link marker")
+        }
+    }
+
+    private static func hasManagedProfileSymlinkMarker(at url: URL) -> Bool {
+        var marker: UInt8 = 0
+        let result: Int = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return -1 }
+            return managedProfileLinkAttribute.withCString { name in
+                withUnsafeMutableBytes(of: &marker) { bytes in
+                    Darwin.getxattr(
+                        path,
+                        name,
+                        bytes.baseAddress,
+                        bytes.count,
+                        0,
+                        XATTR_NOFOLLOW
+                    )
+                }
+            }
+        }
+        return result == 1 && marker == managedProfileLinkAttributeValue
     }
 
     private static func preserveDisplacedItem(
