@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import ServiceManagement
+import ClaudeMDSwitcherCore
 
 @main
 struct ClaudeMDSwitcherApp: App {
@@ -18,8 +19,22 @@ struct ClaudeMDSwitcherApp: App {
     }
 
     @ViewBuilder private var menuContent: some View {
+        Menu("Target: \(store.selectedTarget.displayName)") {
+            ForEach(ProfileTarget.allCases) { target in
+                Button {
+                    store.selectTarget(target)
+                } label: {
+                    Text(store.selectedTarget == target ? "✓ \(target.displayName)" : "   \(target.displayName)")
+                }
+            }
+        }
+        Divider()
+        if store.codexOverrideTakesPrecedence {
+            Text("AGENTS.override.md takes precedence")
+                .disabled(true)
+        }
         if store.profiles.isEmpty {
-            Text("No CLAUDE.*.md profiles found")
+            Text("No \(store.selectedTarget.layout.profilePattern) profiles found")
                 .disabled(true)
         } else {
             ForEach(store.profiles) { profile in
@@ -35,8 +50,8 @@ struct ClaudeMDSwitcherApp: App {
             }
         }
         Divider()
-        Button("Reveal in Finder") { store.revealClaudeDir() }
-        Button("Refresh") { store.rescan() }
+        Button("Reveal in Finder") { store.revealSelectedDirectory() }
+        Button("Refresh") { store.refresh() }
         Divider()
         // Same text-prefix pattern as profile rows — see [[NSMenuItem lesson]].
         // Recompute status on every body render (cheap enum read) so the

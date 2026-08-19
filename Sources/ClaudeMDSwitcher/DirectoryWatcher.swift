@@ -16,7 +16,7 @@ final class DirectoryWatcher {
 
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: descriptor,
-            eventMask: [.write, .delete, .rename, .extend],
+            eventMask: [.write, .delete, .rename, .extend, .attrib],
             queue: .main
         )
         src.setEventHandler {

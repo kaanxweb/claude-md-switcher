@@ -2,7 +2,18 @@
 
 All notable changes to ClaudeMDSwitcher are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.1] — Unreleased
+## [Unreleased]
+
+### Added
+- Added first-class Codex Markdown profiles using the app convention `~/.codex/AGENTS.<name>.md`, activated through Codex's canonical `~/.codex/AGENTS.md`.
+- Added a persistent Claude/Codex target selector, isolated discovery and active-state handling, and an `AGENTS.override.md` precedence warning.
+
+### Security
+- Replaced overwrite-style canonical-file renames with atomic exchange/exclusive renames, preserving concurrently created files and unmanaged symlinks instead of discarding them.
+- Added validation that prevents a Claude profile from being activated into the Codex target or vice versa.
+- Rejects profile links that resolve back to the canonical file and profile names that collide with reserved files under the volume's filename rules.
+
+## [1.0.1] — 2026-07-24
 
 ### Added
 - Added secure automatic update checks through Sparkle 2.9.4 and a **Check for Updates…** menu command. Downloads and installations remain user-approved (`SUAutomaticallyUpdate=false`).
@@ -16,7 +27,7 @@ All notable changes to ClaudeMDSwitcher are documented here. The format is based
 ### Fixed
 - Preserved a later regular `~/.claude/CLAUDE.md` as a uniquely named recovery profile when `CLAUDE.default.md` already exists, avoiding content loss during profile switching.
 
-v1.0.0 cannot self-update, so users must manually replace it with v1.0.1 once. Profiles in `~/.claude/` are unaffected. v1.0.1 uses build number 2 and is intended to be the first Developer ID-signed and notarized release.
+v1.0.0 cannot self-update, so users must manually replace it with v1.0.1 once. Profiles in `~/.claude/` are unaffected. v1.0.1 uses build number 2 and is the first Developer ID-signed and notarized release.
 
 ## [1.0.0] — 2026-05-14
 
